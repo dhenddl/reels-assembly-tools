@@ -1,0 +1,15 @@
+{
+  "name": "reels-assembly-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "세로 영상 조립 도구 — 훅 렌더, 생성형 클립 이어붙이기, 첫 3초 검사. 발행은 하지 않는다.",
+  "type": "module",
+  "scripts": {
+    "setup": "npm install && npx playwright install chromium"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "playwright": "^1.49.0"
+  },
+  "license": "MIT"
+}
