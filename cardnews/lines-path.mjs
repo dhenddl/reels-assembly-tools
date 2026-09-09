@@ -1,6 +1,7 @@
-// lines-path.mjs — 릴스 렌더 **입력**의 경로 규칙. 단일 출처.
+// lines-path.mjs — 릴스 렌더 입력·기록의 경로 규칙. 단일 출처.
 //   `--lines`   화면 대본   → cardnews/lines/<slug>.txt
 //   `--narrate` 내레이션 대본 → cardnews/narration/<slug>.txt
+//   렌더 기록(레시피)      → cardnews/renders/<slug>-render.json   ← 2026-09-09 추가
 //
 // ⚠️ 파일 이름이 `lines-path` 인 건 이력이다 — 처음엔 `--lines` 만 다뤘다.
 //    이미 세 곳이 import 하고 자료 3·4호에 편입돼 있어 이름을 바꾸지 않았다.
@@ -11,6 +12,7 @@
 //   publish/check-rank-claims.mjs  (릴스 화면 텍스트의 순위 주장 검사)
 //   publish/check-schedule.mjs     (릴스 슬롯 준비 여부)
 //   cardnews/check-sources.mjs     (원본이 out/ 에 섞였는지)
+//   cardnews/make-termcast.mjs     (렌더 기록 쓰는 자리 — 2026-09-09)
 //
 // ⛔ 2026-08-26 신설. 종전에는 대본이 `out/<slug>/lines.txt` 에 있었고 `out/` 은
 //    `.gitignore` 로 통째 제외돼 있었다 — **생성물 폴더에 원본이 섞여 있었다.**
@@ -78,4 +80,26 @@ export function listLineSlugs({ includeScratch = false } = {}) {
     .map((f) => f.slice(0, -4))
     .filter((s) => includeScratch || !s.startsWith('_'))
     .sort();
+}
+
+/**
+ * 렌더 **기록**(레시피)가 사는 곳. `cardnews/renders/<slug>-render.json`
+ *
+ * ⛔ 2026-09-09 에 `out/<slug>/<slug>-render.json` 에서 옮겨왔다.
+ *   이 기록은 2026-08-21 에 **자산을 잃어서** 생겼다 — 릴스 4편의 훅이 빠졌는데
+ *   원래 렌더 명령이 어디에도 없어 영상 프레임을 뽑아 화면에서 읽어 복원했다.
+ *   ★★ 그러고는 그 기록을 **`out/` 안에** 뒀다. `.gitignore` 가 통째 제외하는 자리다.
+ *      **손실을 막으려고 만든 파일이 손실 구역에 있었다** — 14개 전부 이 디스크에만 있었다.
+ *   ▶ 대본(2026-08-26)과 같은 처방이다. 다만 이건 입력이 아니라 **기록**이라
+ *     재생성되지 않는다 — 다시 렌더하면 `renderedAt` 이 바뀌어 그때의 기록이 아니다.
+ *
+ * ⚠️ 아무 스크립트도 이 파일을 **읽지 않는다.** 사람이 재현할 때 읽는다.
+ *   그래서 규칙이 코드에 없으면 다음 사람이 또 out/ 안에 만든다. 그 자리를 여기로 못 박는다.
+ */
+export const RENDERS_DIR = path.join(HERE, 'renders');
+
+/** 슬러그 → 렌더 기록 절대경로. */
+export function renderRecipePath(slug) {
+  if (!slug || typeof slug !== 'string') throw new Error('renderRecipePath: slug 가 필요하다');
+  return path.join(RENDERS_DIR, `${slug}-render.json`);
 }

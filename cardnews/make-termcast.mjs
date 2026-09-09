@@ -23,6 +23,7 @@ import { resolve, dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tryWriteReelCaption, readPublishDate, drivePathFor } from './reel-caption.mjs';
 import { loadTheme, rgba } from './palette.mjs';
+import { renderRecipePath } from './lines-path.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -611,7 +612,12 @@ console.log(`완료: ${outAbs}`);
 //   화면에서 명령어를 읽어 복원했다. 세션이 끊기면 사라지는 자산이었다.
 // → 이제 렌더할 때마다 실제 인자를 파일로 남긴다. 재현이 추측이 아니게 된다.
 try {
-  const recipePath = join(dirname(outAbs), `${args.slug || basename(dirname(outAbs))}-render.json`);
+  // ⛔ 2026-09-09 — 종전엔 `join(dirname(outAbs), …)` 였다. 즉 **`out/` 안**이다.
+  //   `.gitignore` 가 `cardnews/out/` 을 통째 제외하므로
+  //   **손실을 막으려고 만든 이 기록이 백업 없는 자리에** 14개 쌓여 있었다.
+  //   ▶ 경로 규칙은 `lines-path.mjs` 가 단일 출처로 들고 있다.
+  const recipePath = renderRecipePath(args.slug || basename(dirname(outAbs)));
+  mkdirSync(dirname(recipePath), { recursive: true });
   writeFileSync(recipePath, JSON.stringify({
     renderedAt: new Date().toISOString(),
     node: process.version,

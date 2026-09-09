@@ -35,11 +35,17 @@ const OUT = oi >= 0 && process.argv[oi + 1]
 
 // ── ① 확정 위반 — 원본이 out/ 안에 있다 ──────────────────────────────
 // 2026-08-26 에 전량 밖으로 옮겼다. 여기 걸리면 **새로 생긴 것**이다.
+// ⛔ 2026-09-09 추가 — `<slug>-render.json` 은 종전 **생성물로 분류돼 있었다.**
+//   그건 틀렸다. 다시 렌더하면 `renderedAt`·`argv` 가 그때 것이 아니라 **기록이다.**
+//   ★★ 이 파일은 2026-08-21 에 렌더 명령을 잃어서 생겼는데, 만들자마자
+//   `out/` 안에 놓았다 — **손실을 막으려고 만든 것을 손실 구역에 둔 것.**
+//   ▶ 14개를 `cardnews/renders/` 로 옮겼고 `make-termcast.mjs` 도 그리로 쓴다.
 const STRAY_SOURCE = [
   { re: /^lines.*\.txt$/i, home: 'cardnews/lines/<slug>.txt', why: 'make-termcast --lines 입력 (릴스 화면 대본)' },
   { re: /^narration.*\.txt$/i, home: 'cardnews/narration/<slug>.txt', why: 'make-termcast --narrate 입력 (릴스 내레이션 대본)' },
   { re: /^littly-reels-setup.*\.txt$/i, home: 'publish/runbooks/littly-reels-setup-<날짜>.txt', why: '손으로 쓴 운영 런북 (리틀리 등록 절차, 폰 복사용)' },
   { re: /^config\.json$/i, home: 'cardnews/configs/<slug>.json', why: '손으로 쓴 렌더 설정 (아무 스크립트도 안 읽지만 사람이 쓴 원고다)' },
+  { re: /-render\.json$/i, home: 'cardnews/renders/<slug>-render.json', why: 'make-termcast 렌더 기록 (재현 레시피 — 다시 렌더하면 그때의 기록이 아니다)' },
 ];
 
 // ── ①-b 증거 — out/ 에 두는 게 **맞는** 것 ────────────────────────────
@@ -59,7 +65,6 @@ const EVIDENCE = [
 const TEXTISH = /\.(txt|json|md|vtt|srt|csv)$/i;
 const KNOWN_GENERATED = [
   /-reels-caption\.txt$/i,     // reel-caption.mjs
-  /-render\.json$/i,           // make-termcast.mjs 렌더 레시피
   /-review\.json$/i,
   /-alt\.json$/i,
   /^frames?\b/i,
