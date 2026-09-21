@@ -128,6 +128,28 @@ async function contactSheet(mp4, dur, slug) {
   return sheet;
 }
 
+/* ── 컷 수 (2026-09-21 신설 — 사용자 지시 「릴스·모션 제작시에 적극 반영」) ──────────
+   왜: 🔬 그날 `@lazy_owen` 릴스 4편을 받아 재니 **컷 4.7~5.3/10초**(36~53초에 하드컷 17~27)인데
+       우리 `reels-three-faces` 는 **14.8초에 하드컷 0** 이었다. 저쪽은 2초마다 화면이 바뀌고
+       우리는 한 번도 안 바뀐다. watch time 이 랭킹 1번 신호인데 그 축을 우리가 재본 적이 없다.
+   ⛔ **막지 않는다 — 경고만 한다.** 이유 둘:
+       ① 터미널 캐스트는 컷이 0 인 게 형식상 정상일 수 있다. 막으면 기존 회차가 전부 걸린다.
+       ② 「컷이 많으면 좋다」는 아직 **우리 데이터로 검증 안 됐다**(저쪽 4편 · 조회수 미상).
+          검증 안 된 축으로 발행을 막는 건 게이트가 아니라 사고다 — check-ai-tell 과 같은 규약.
+   ⚠️ 임계 0.3 은 ffmpeg scene 점수다. 우리 릴스 실측 최대가 0.154 라 **0 으로 떨어지는 게 맞다.**
+   📌 함정: `metadata=print` 는 `select` 의 `scene` 식이 점수를 계산해줘야 채워진다.
+      그리고 `-v error` 를 붙이면 showinfo·metadata 출력(info 레벨)이 통째로 사라진다.
+      ★ 둘 다 실제로 걸렸다 — 양성 대조군(우리 릴스) 없이 돌렸으면 「저쪽도 컷 0」으로 보고할 뻔했다. */
+const CUT_SCENE = 0.3;
+async function cutsPer10s(mp4, dur) {
+  try {
+    const { stdout, stderr } = await run('ffmpeg',
+      ['-i', mp4, '-vf', `select='gt(scene,${CUT_SCENE})',showinfo`, '-f', 'null', '-']);
+    const n = ((stdout + stderr).match(/pts_time/g) || []).length;
+    return { n, per10: dur > 0 ? (n / dur) * 10 : 0 };
+  } catch { return { n: null, per10: null }; }   // ffmpeg 가 죽어도 검사를 죽이지 않는다
+}
+
 const argv = process.argv.slice(2);
 const noSheet = argv.includes('--no-sheet');
 const filter = argv.find((a) => !a.startsWith('--'));
@@ -166,9 +188,11 @@ for (const d of dirs) {
   // ⚠️ 변화폭 조건이 필요하다 — 전검정·전백 영상은 |첫−끝|=0 이라 루프형으로 잘못 찍힌다(음성 시험에서 발견).
   const spread = Math.max(...ink) - Math.min(...ink);
 
+  const cuts = await cutsPer10s(mp4, dur);
+
   let sheet = null;
   if (!noSheet) sheet = await contactSheet(mp4, dur, d + (suffix === '-reels.mp4' ? '' : '-with-sting'));
-  rows.push({ slug: label, dur, ink, verdict, black, midLow, blown, loopGap, spread, sheet, outOfBand, overOurs });
+  rows.push({ slug: label, dur, ink, verdict, black, midLow, blown, loopGap, spread, sheet, outOfBand, overOurs, cuts });
  }
 }
 
@@ -176,10 +200,11 @@ if (!rows.length) { console.error('검사할 릴스가 없다 (out/<slug>/<slug>
 
 const f2 = (v) => v.toFixed(2).padStart(6);
 console.log(`\n릴스 렌더 후 자기검사 — ${rows.length}편 · 샘플 ${POS.map((p) => Math.round(p * 100) + '%').join(' ')}`);
-console.log('판정  슬러그                       길이   ' + POS.map((p) => (Math.round(p * 100) + '%').padStart(6)).join('  ') + '   |첫−끝|');
+console.log('판정  슬러그                       길이   ' + POS.map((p) => (Math.round(p * 100) + '%').padStart(6)).join('  ') + '   |첫−끝|   컷/10s');
 for (const r of rows) {
+  const c = r.cuts.n === null ? '   ?  ' : `${r.cuts.per10.toFixed(1).padStart(4)}(${r.cuts.n})`;
   console.log(`${r.verdict}  ${r.slug.padEnd(28)}${r.dur.toFixed(2).padStart(5)}s  ` +
-    r.ink.map(f2).join('  ') + `   ${r.loopGap.toFixed(2).padStart(5)}p` +
+    r.ink.map(f2).join('  ') + `   ${r.loopGap.toFixed(2).padStart(5)}p  ${c}` +
     (r.loopGap < 0.15 && r.spread > 0.5 ? ' 루프형' : ''));
 }
 
@@ -195,6 +220,18 @@ for (const r of chks) {
   console.log(`⚠️ ${r.slug}: ${why.join(' · ')} — 콘택트시트를 눈으로 확인`);
 }
 if (!fails.length && !chks.length) console.log('✅ 전편 통과 — 검은 프레임 0, 중간 공백 0, 과노출 0, 길이 대역 안');
+
+// ── 컷 수 — 경고만 한다(위 머리말 참조). 막지 않는다.
+const flat = rows.filter((r) => r.cuts.n === 0);
+const unknown = rows.filter((r) => r.cuts.n === null);
+if (flat.length) {
+  console.log(`\n⚠️ 하드컷 0 — ${flat.length}편: ${flat.map((r) => r.slug).join(' · ')}`);
+  console.log('   화면이 처음부터 끝까지 한 번도 안 바뀐다는 뜻이다.');
+  console.log('   🔬 대조(2026-09-21 실측): @lazy_owen 릴스 4편은 36~53초에 컷 17~27 = **4.7~5.3/10초**.');
+  console.log('   ▶ 쓸 수 있는 것: motion/mockups.html 의 목업 8종(chart · stagger-rows 포함) · 터미널 창 분할 배치.');
+  console.log('   ⛔ 그래도 막지 않는다 — 「컷이 많으면 좋다」는 우리 데이터로 아직 검증 안 됐다(저쪽 4편·조회수 미상).');
+}
+if (unknown.length) console.log(`\n⚠️ 컷 수를 못 쟀다 — ${unknown.length}편. 「0」이 아니라 「못 물어봤다」다.`);
 
 for (const r of rows.filter((x) => x.overOurs)) {
   console.log(`📏 ${r.slug}: ${r.dur.toFixed(2)}s — 우리 기존 최장(${OURS_MAX}s)을 넘는다.`);

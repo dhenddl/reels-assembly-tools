@@ -6,7 +6,7 @@
 // 사용법:
 //   node make-termcast.mjs --lines out/day-2/publish-output.txt \
 //     --cmd "node publish.mjs --manifest post-day-2.json" \
-//     --title "day-2.sh — 무인 수익 실험" \
+//     --title "day-2.sh — AI 자동화 · 개발자 부업" \
 //     --out out/day-2/day-2-reels.mp4 [--drive gdrive:dhenddl-reels/]
 //   실시간 캡처: --run "node ../publish/publish.mjs --manifest ../publish/post-day-2.json --dry-run"
 //     (--run 은 명령을 실제 실행해 stdout 을 캡처 — API 를 호출하므로 재렌더 시엔 --lines 권장)
