@@ -23,6 +23,7 @@ import { resolve, dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tryWriteReelCaption, readPublishDate, drivePathFor } from './reel-caption.mjs';
 import { loadTheme, rgba } from './palette.mjs';
+import { 구도 } from './safe-zone.mjs';
 import { renderRecipePath } from './lines-path.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -289,7 +290,7 @@ body { font-family:${fonts.mono}; color:var(--text); }
    벤치마크 4계정 대조). 자막을 크게 세우고 터미널은 위로 밀어 **증거**로 축소한다.
    레이아웃(1080×1920, 2026-08-11 2차 조정 — 캐릭터를 키워 하단을 채운다):
      chrome 0~114 / 터미널 114~620 / **자막 640~894** / **캐릭터 920~1620(700px)** / CTA 하단.
-   ⚠️ 캐릭터 바닥은 300px 위에 고정이다 — 인스타 릴스 하단 UI(캡션·버튼)가 그만큼 덮는다(README 실측).
+   ⚠️ 캐릭터 바닥은 safe-zone.mjs 의 구도.캐릭터바닥 위에 고정이다 — 그 숫자는 거기에만 있다(2026-09-18 합침).
       그래서 캐릭터를 키우려면 **아래로 못 늘리고 위로만** 늘어나고, 자막·터미널이 같이 올라가야 한다.
    ⚠️ text-wrap:pretty 는 render.js에서 고아 줄 14건을 0으로 만든 그 한 줄이다 — 여기도 넣는다.
    ⚠️⚠️ 이 주석에 백틱을 쓰지 말 것. 이 CSS는 템플릿 문자열 안이라 백틱이 문자열을 끊는다.
@@ -328,10 +329,12 @@ body { font-family:${fonts.mono}; color:var(--text); }
   color:var(--text); text-wrap:pretty; word-break:keep-all; overflow-wrap:break-word;
   font-variant-numeric: tabular-nums; letter-spacing:-0.02em; }
 /* ★ 캐릭터 (2026-08-11). assets/characters/README.md의 **실측 배치를 그대로** 쓴다:
-   높이 520px · 우측 여백 56px · 바닥에서 300px 이상(인스타 하단 UI인 캡션·버튼을 피하는 값).
+   높이 520px · 우측 여백과 바닥 여백은 safe-zone.mjs 의 구도 값을 따른다.
+   ⛔⛔ 그 값은 2026-09-18 실측(하단 UI 650px)보다 일부러 낮다 — 캐릭터 하단 약 350px 이 캡션 아래 깔린다.
+      장식이라 부분 가림을 받아들였고, 이미 발행된 회차들이 이 구도로 나갔다. 자막(640~894)은 안전하다.
    ⚠️ image-rendering:pixelated 필수 — 픽셀아트를 bilinear로 늘리면 계단이 뭉개져 정체성이 깨진다.
    z-index 4 = 훅(5)보다 아래. 0초엔 훅이 화면을 덮으므로 캐릭터는 훅이 걷힌 뒤 나타난다. */
-#char { position:absolute; right:56px; bottom:300px; height:${charH}px; z-index:4;
+#char { position:absolute; right:${구도.캐릭터우측여백}px; bottom:${구도.캐릭터바닥}px; height:${charH}px; z-index:4;
   image-rendering: pixelated; }
 .hook { position:absolute; inset:0; background:var(--bg); z-index:5;
   display:flex; flex-direction:column; justify-content:center; padding:0 88px;
