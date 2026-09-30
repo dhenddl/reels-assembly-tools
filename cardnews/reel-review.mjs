@@ -140,14 +140,27 @@ async function contactSheet(mp4, dur, slug) {
    📌 함정: `metadata=print` 는 `select` 의 `scene` 식이 점수를 계산해줘야 채워진다.
       그리고 `-v error` 를 붙이면 showinfo·metadata 출력(info 레벨)이 통째로 사라진다.
       ★ 둘 다 실제로 걸렸다 — 양성 대조군(우리 릴스) 없이 돌렸으면 「저쪽도 컷 0」으로 보고할 뻔했다. */
+/* ✏️ 2026-09-21 보강 — **하드컷만 세면 안 보이는 게 있다.**
+   🔬 그날 늦게 장면변화 점수 분포를 재보니 격차가 컷 수보다 컸다:
+       우리 `reels-three-faces` 평균 **0.0017** · 저쪽 `@lazy_owen` 평균 **0.0173** — **10배**.
+       0.05 초과 프레임도 **2/351(0.57%)** 대 **34/1074(3.2%)** 다.
+   ▶ 우리 릴스는 컷이 없을 뿐 아니라 **평시에 화면이 거의 안 움직인다.**
+   ★ 그래서 `avg`(평균 변화량)와 `mid`(0.05 초과 프레임 비율)를 같이 찍는다.
+     컷이 0 이어도 **안쪽 상태 변화**로 화면을 바꿀 수 있고, 그게 터미널 캐스트에 더 맞는 길이다
+     (2026-09-16 withvaigent 「편집없이 AI로 모션그래픽」의 1.6초 규칙 — 볼트 요약 참조). */
 const CUT_SCENE = 0.3;
+const MID_SCENE = 0.05;
 async function cutsPer10s(mp4, dur) {
   try {
     const { stdout, stderr } = await run('ffmpeg',
-      ['-i', mp4, '-vf', `select='gt(scene,${CUT_SCENE})',showinfo`, '-f', 'null', '-']);
-    const n = ((stdout + stderr).match(/pts_time/g) || []).length;
-    return { n, per10: dur > 0 ? (n / dur) * 10 : 0 };
-  } catch { return { n: null, per10: null }; }   // ffmpeg 가 죽어도 검사를 죽이지 않는다
+      ['-i', mp4, '-vf', `select='gt(scene,0)',metadata=print:key=lavfi.scene_score`, '-f', 'null', '-']);
+    const v = [...(stdout + stderr).matchAll(/lavfi\.scene_score=([0-9.]+)/g)].map((m) => parseFloat(m[1]));
+    if (!v.length) return { n: null, per10: null, avg: null, mid: null };
+    const n = v.filter((x) => x > CUT_SCENE).length;
+    const avg = v.reduce((a, b) => a + b, 0) / v.length;
+    const mid = (v.filter((x) => x > MID_SCENE).length / v.length) * 100;
+    return { n, per10: dur > 0 ? (n / dur) * 10 : 0, avg, mid };
+  } catch { return { n: null, per10: null, avg: null, mid: null }; }   // ffmpeg 가 죽어도 검사를 죽이지 않는다
 }
 
 const argv = process.argv.slice(2);
@@ -200,11 +213,13 @@ if (!rows.length) { console.error('검사할 릴스가 없다 (out/<slug>/<slug>
 
 const f2 = (v) => v.toFixed(2).padStart(6);
 console.log(`\n릴스 렌더 후 자기검사 — ${rows.length}편 · 샘플 ${POS.map((p) => Math.round(p * 100) + '%').join(' ')}`);
-console.log('판정  슬러그                       길이   ' + POS.map((p) => (Math.round(p * 100) + '%').padStart(6)).join('  ') + '   |첫−끝|   컷/10s');
+console.log('판정  슬러그                       길이   ' + POS.map((p) => (Math.round(p * 100) + '%').padStart(6)).join('  ') + '   |첫−끝|   컷/10s  변화량  움직인%');
 for (const r of rows) {
   const c = r.cuts.n === null ? '   ?  ' : `${r.cuts.per10.toFixed(1).padStart(4)}(${r.cuts.n})`;
+  const a = r.cuts.avg === null ? '    ?  ' : r.cuts.avg.toFixed(4).padStart(7);
+  const m = r.cuts.mid === null ? '     ?' : `${r.cuts.mid.toFixed(1).padStart(5)}%`;
   console.log(`${r.verdict}  ${r.slug.padEnd(28)}${r.dur.toFixed(2).padStart(5)}s  ` +
-    r.ink.map(f2).join('  ') + `   ${r.loopGap.toFixed(2).padStart(5)}p  ${c}` +
+    r.ink.map(f2).join('  ') + `   ${r.loopGap.toFixed(2).padStart(5)}p  ${c} ${a}  ${m}` +
     (r.loopGap < 0.15 && r.spread > 0.5 ? ' 루프형' : ''));
 }
 
@@ -230,6 +245,9 @@ if (flat.length) {
   console.log('   🔬 대조(2026-09-21 실측): @lazy_owen 릴스 4편은 36~53초에 컷 17~27 = **4.7~5.3/10초**.');
   console.log('   ▶ 쓸 수 있는 것: motion/mockups.html 의 목업 8종(chart · stagger-rows 포함) · 터미널 창 분할 배치.');
   console.log('   ⛔ 그래도 막지 않는다 — 「컷이 많으면 좋다」는 우리 데이터로 아직 검증 안 됐다(저쪽 4편·조회수 미상).');
+  console.log('   ★ 컷만이 답이 아니다 — 「변화량」·「움직인%」를 같이 본다.');
+  console.log('     🔬 대조: 우리 평균 0.0017 · 움직인 0.6%  vs  저쪽 평균 0.0173 · 움직인 3.2% (약 10배·5배).');
+  console.log('     ▶ 컷 없이 올리는 법: 장면이 1.6초를 넘으면 **카드를 고정한 채 안쪽 상태 변화 2~3개**로 쪼갠다.');
 }
 if (unknown.length) console.log(`\n⚠️ 컷 수를 못 쟀다 — ${unknown.length}편. 「0」이 아니라 「못 물어봤다」다.`);
 

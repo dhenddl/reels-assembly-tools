@@ -368,8 +368,8 @@ ${cues.length ? `<div id="sub"></div>` : ''}
 ${charDataURI ? `<img id="char" src="${charDataURI}">` : ''}
 ${args.hookText ? `<div class="hook" id="hook"><div class="hglow"></div>
   ${args.hookBadge ? `<div class="hb">${esc(args.hookBadge)}</div>` : ''}
-  <div class="ht">${esc(args.hookText).replace(/\\n/g, '<br>')}</div>
-  ${args.hookSub ? `<div class="hs">${esc(args.hookSub).replace(/\\n/g, '<br>')}</div>` : ''}
+  <div class="ht">${esc(args.hookText).replace(/\\n|\n/g, '<br>')}</div>
+  ${args.hookSub ? `<div class="hs">${esc(args.hookSub).replace(/\\n|\n/g, '<br>')}</div>` : ''}
 </div>` : ''}
 <script>
 const CMD = ${JSON.stringify(args.cmd)};
