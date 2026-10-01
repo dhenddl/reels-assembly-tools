@@ -10,7 +10,7 @@
 
 ## 왜 코드로 조립하나
 
-생성형 AI 로 만든 클립에는 **워터마크가 박혀 나옵니다.** 제 계정에는 그걸 끄는 설정이 없었습니다.
+생성형 AI 로 만든 클립에는 **워터마크가 박혀 나옵니다.** 제가 쓰는 생성 도구에는 워터마크 표시를 끄는 설정이 있지만, 저는 켜 둔 채로 씁니다. AI 로 만든 구간이라는 표시이기 때문입니다.
 
 편집 도구 안에서 통째로 이어붙이면 그 워터마크가 **전 구간에** 남습니다. 우리가 만든 훅 화면까지요.
 
@@ -81,6 +81,17 @@ npx playwright install chromium
 ## 견본 레시피
 
 `cardnews/reels-recipes.sample.json` 은 회차별 설정 견본입니다. **이미 발행이 끝난 회차 둘**만 넣었고 진행 중인 실험 항목은 뺐습니다.
+
+견본으로 훅 화면 하나를 렌더해 보는 순서입니다.
+
+```bash
+cp cardnews/reels-recipes.sample.json cardnews/reels-recipes.json
+node cardnews/render-reels.mjs reels-297
+node cardnews/hook-check.mjs reels-297
+node cardnews/reel-review.mjs
+```
+
+**화면 대본이 따로 있어야 합니다.** `render-reels` 는 레시피만 읽지 않고 `cardnews/lines/<슬러그>.txt` 를 같이 읽습니다. 터미널 화면에 찍힐 글자를 줄 그대로 적은 파일입니다. 견본 두 회차(`reels-297` · `reels-hookfix`)의 대본은 저장소에 들어 있습니다. 여러분 회차를 만들 때는 레시피에 회차를 추가하고, 같은 슬러그 이름으로 대본 파일을 만드세요. 이 폴더가 없으면 `render-reels` 가 렌더 전에 멈춥니다(exit 1).
 
 ## 만든 곳
 

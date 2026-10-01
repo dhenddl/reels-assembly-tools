@@ -4,7 +4,8 @@
   "_쓰는 법": [
     "1. 이 파일을 reels-recipes.json 으로 복사한다.",
     "2. recipes[] 를 여러분 회차로 바꾼다. slug 가 출력 폴더 이름이 된다.",
-    "3. node render-reels.mjs <slug> 로 렌더하고 hook-check.mjs · reel-review.mjs 로 검사한다.",
+    "3. cardnews/lines/<slug>.txt 에 화면 대본을 쓴다 — 터미널 화면에 찍힐 글자를 줄 그대로. 견본 두 회차(reels-297 · reels-hookfix) 대본은 같이 들어 있다. ⛔ 이 폴더가 없으면 render-reels 가 렌더 전에 멈춘다(exit 1).",
+    "4. node render-reels.mjs <slug> 로 렌더하고 hook-check.mjs · reel-review.mjs 로 검사한다.",
     "⚠️ 값은 우리 실측이다. 여러분 숫자로 바꾸지 않으면 남의 숫자가 나간다."
   ],
   "_필드": {

@@ -1,4 +1,7 @@
 node_modules/
 out/
-lines/
+# 화면 대본은 여러분 원고라 올리지 않는다. 견본 두 회차만 같이 둔다 (2026-10-01)
+cardnews/lines/*
+!cardnews/lines/reels-297.txt
+!cardnews/lines/reels-hookfix.txt
 .env
