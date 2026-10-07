@@ -7,7 +7,7 @@
 // 단독 실행도 가능(매니페스트가 영상보다 늦게 확정된 경우 재생성용):
 //   node reel-caption.mjs --slug day-2 --out out/day-2/day-2-reels-caption.txt
 //   node reel-caption.mjs --manifest ../publish/post-day-2.json --out out/day-2/day-2-reels-caption.txt
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { resolve, dirname, basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -21,12 +21,52 @@ export function findManifest(slug) {
   return existsSync(p) ? p : null;
 }
 
+// ── AI 라벨 안내 파일 (2026-10-02 신설 · 사용자 지시 「1번부터 시작」) ──────────────
+// ⛔⛔ 왜: 9/25 `reels-no-face` 가 매니페스트 `isAiGenerated: true` 인데 **라벨 없이** 나갔다(사용자 앱 확인).
+//   릴스는 폰 업로드라 라벨은 **사람이 앱에서 켠다.** 그런데 그 「켜야 한다」는 기록이 매니페스트에만 있고
+//   폰이 받는 드라이브에는 영상·캡션 txt 뿐이었다 — **기록이 업로드하는 사람 앞에 안 갔다.**
+//   캡션 누락(9/18~25)과 같은 자리(폰 업로드 경로)의 두 번째 구멍이다(log [2026-09-28]).
+// ▶ 매니페스트가 `isAiGenerated: true` 면 캡션 txt **옆에** `<slug>-reels-AI-LABEL-ON.txt` 를 같이 만든다.
+//   드라이브 이름 규약(<발행일>-<파일명>)을 타면 폰 목록에서 영상·캡션 바로 옆 줄에 뜬다.
+// ⛔ 캡션 txt 안에 넣지 않는다 — 폰에서 「전체 선택 → 복사」하면 안내문이 캡션에 같이 붙는다.
+// ⛔ 캡션 파일 이름도 바꾸지 않는다 — `check-schedule` 이 `<발행일>-<slug>-reels-caption.txt` 를 이름으로 찾는다.
+// ⚠️ 파일명은 ASCII 로 둔다 — `check-schedule` 이 rclone lsf 출력과 이름을 문자열로 대조한다(인코딩 변수를 안 만든다).
+// ★ 플래그가 false/없음으로 바뀌면 남아 있던 안내 파일을 지운다 — 낡은 안내가 「켜라」고 말하면 안 된다.
+export const aiLabelNotePathFor = (captionPath) => captionPath.replace(/-caption\.txt$/, '-AI-LABEL-ON.txt');
+
+function aiLabelNoteText(manifestPath) {
+  return [
+    '[AI 라벨 켜기] 이 회차는 AI 로 만든 구간이 있습니다.',
+    '업로드할 때 인스타 앱의 「AI 라벨 추가」를 켜 주세요.',
+    '',
+    `근거: ${basename(manifestPath)} 의 isAiGenerated: true`,
+    '게시 뒤 아침 점검(check-reel-published)이 라벨이 실제로 켜졌는지 API 로 되읽습니다.',
+    '이 파일은 캡션이 아닙니다. 캡션은 옆의 -reels-caption.txt 입니다.',
+    '',
+  ].join('\n');
+}
+
+// 캡션 txt 와 함께 드라이브에 올라갈 파일들 — 캡션 + (있으면) AI 라벨 안내. 조립기 셋이 같은 함수를 쓴다.
+export function captionSidecars(captionPath) {
+  if (!captionPath) return [];
+  return [captionPath, aiLabelNotePathFor(captionPath)].filter((f) => existsSync(f));
+}
+
 // 매니페스트의 caption(인스타 캐러셀용, 해시태그 포함)을 그대로 릴스 캡션으로 재사용해 outTxtPath에 기록.
+// isAiGenerated: true 면 옆에 AI 라벨 안내 파일도 쓴다(위 절).
 export function writeReelCaption(manifestPath, outTxtPath) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   const caption = manifest.caption ?? manifest.threadsText ?? '';
   if (!caption.trim()) throw new Error(`${manifestPath}에 caption/threadsText 없음`);
   writeFileSync(outTxtPath, caption, 'utf8');
+  const notePath = aiLabelNotePathFor(outTxtPath);
+  if (manifest.isAiGenerated === true) {
+    writeFileSync(notePath, aiLabelNoteText(manifestPath), 'utf8');
+    console.log(`AI 라벨 안내 저장: ${notePath} (매니페스트 isAiGenerated: true — 업로드 때 앱에서 라벨을 켠다)`);
+  } else if (notePath !== outTxtPath && existsSync(notePath)) {
+    unlinkSync(notePath);
+    console.log(`AI 라벨 안내 삭제: ${notePath} (매니페스트 isAiGenerated 가 true 가 아니다)`);
+  }
   return caption;
 }
 
@@ -125,6 +165,11 @@ export function uploadReelToDrive({ files, pubDate, remote = 'gdrive:dhenddl-ree
     }
     uploaded.push(dest);
   }
+  // 업로드 끝에 지난 회차를 정리 폴더로 내린다 — 스위치가 켜진 뒤에만(위 DRIVE_ARCHIVE_ON_UPLOAD). 실패해도 업로드 결과는 그대로다.
+  if (DRIVE_ARCHIVE_ON_UPLOAD) {
+    try { printDrivePlan(archiveDriveOld({ apply: true, remote, rclone }), { apply: true }); }
+    catch (e) { console.log(`⚠️ 드라이브 정리 건너뜀 — ${e.message}`); }
+  }
   return { ok: true, uploaded, why: '' };
 }
 
@@ -132,17 +177,87 @@ export function uploadReelToDrive({ files, pubDate, remote = 'gdrive:dhenddl-ree
 export const drivePathFor = (drive, filePath, pubDate) =>
   `${drive.replace(/\/+$/, '')}/${pubDate}-${basename(filePath)}`;
 
+// ── 드라이브 정리 (2026-10-02 신설 · 사용자 승인 「셋 다 진행해」, 볼트 경유) ──────────────
+// 📌 왜: 맨 위 칸에 파일 80 + 폴더 3 이 쌓여 있고 오늘 이후 발행분은 11개다. 폰에서 「오늘 올릴 것」을
+//   80개 사이에서 고른다 — 2026-08-05 에 날짜 접두를 붙인 이유(16개 사이에서 못 골랐다)가 다시 생겼다.
+// ▶ 규칙: 맨 위 칸에는 **오늘 이후 발행분만** 둔다.
+//   · 발행일(파일명 앞 YYYY-MM-DD)이 어제 이전 → `_archive/YYYY-MM/` 로 **move** (⛔ 삭제 없음)
+//   · 작업 폴더(이름이 `_` 로 시작하지 않는 폴더) → `_work/` 로 move
+//   · 폴더명은 ASCII — check-schedule 이 lsf 출력과 문자열로 대조한다.
+// ⛔⛔ 첫 실행은 **옮길 목록만 찍는 드라이런**이고, 사용자가 그 목록을 보고 확인한 뒤에 옮긴다(사용자에게 그렇게 약속했다).
+//   그래서 업로드 끝에서 자동으로 옮기는 스위치는 **꺼진 채로 태어난다** — 확인 뒤 사람이 true 로 바꾼다.
+// ⚠️ check-schedule 은 이제 `lsf -R` 로 하위 폴더까지 읽고 basename 으로 대조한다 — 안 그러면 옮긴 지난 회차가 「드라이브 없음」이 된다.
+export const DRIVE_ARCHIVE_ON_UPLOAD = true;    // ✅ 2026-10-02 사용자 「옮겨」 — 드라이런 72건 확인 뒤 첫 실행(옮김 72 · 실패 0)하고 켰다
+
+const DATE_PREFIX = /^(\d{4})-(\d{2})-(\d{2})-/;
+export function planDriveArchive({ remote = 'gdrive:dhenddl-reels', rclone = 'rclone', today = new Date() } = {}) {
+  const localConf = join(HERE, 'rclone.conf');
+  const confArgs = existsSync(localConf) ? ['--config', localConf] : [];
+  const r = spawnSync(rclone, [...confArgs, 'lsf', remote], { encoding: 'utf8', timeout: 90_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.status !== 0) return { ok: false, why: `rclone lsf 실패 — ${String(r.stderr || '').split(String.fromCharCode(10))[0].slice(0, 120)}`, moves: [], keep: [] };
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const moves = [], keep = [];
+  for (const raw of String(r.stdout).split(String.fromCharCode(10)).map((s) => s.trim()).filter(Boolean)) {
+    const isDir = raw.endsWith('/');
+    const name = isDir ? raw.slice(0, -1) : raw;
+    if (name.startsWith('_')) { keep.push({ name, why: '정리 폴더' }); continue; }
+    if (isDir) { moves.push({ from: name, to: `_work/${name}`, why: '작업 폴더' }); continue; }
+    const m = name.match(DATE_PREFIX);
+    if (!m) { keep.push({ name, why: '날짜 접두 없음 — 사람이 본다' }); continue; }
+    const date = `${m[1]}-${m[2]}-${m[3]}`;
+    if (date < todayIso) moves.push({ from: name, to: `_archive/${m[1]}-${m[2]}/${name}`, why: `발행일 ${date} < 오늘 ${todayIso}` });
+    else keep.push({ name, why: `발행일 ${date} ≥ 오늘` });
+  }
+  return { ok: true, why: '', moves, keep, todayIso };
+}
+
+// apply=false 면 목록만 돌려준다. apply=true 면 rclone moveto 로 하나씩 옮기고, 실패한 것은 멈추지 않고 모은다.
+export function archiveDriveOld({ apply = false, remote = 'gdrive:dhenddl-reels', rclone = 'rclone', today = new Date() } = {}) {
+  const plan = planDriveArchive({ remote, rclone, today });
+  if (!plan.ok || !apply) return { ...plan, moved: [], failed: [] };
+  const localConf = join(HERE, 'rclone.conf');
+  const confArgs = existsSync(localConf) ? ['--config', localConf] : [];
+  const moved = [], failed = [];
+  const base = remote.replace(/\/+$/, '');
+  for (const mv of plan.moves) {
+    const r = spawnSync(rclone, [...confArgs, 'moveto', `${base}/${mv.from}`, `${base}/${mv.to}`], { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (r.status === 0) moved.push(mv);
+    else failed.push({ ...mv, err: String(r.stderr || '').split(String.fromCharCode(10))[0].slice(0, 120) });
+  }
+  return { ...plan, moved, failed };
+}
+
+export function printDrivePlan(res, { apply = false } = {}) {
+  if (!res.ok) { console.log(`⚠️ 드라이브 정리 — ${res.why}`); return; }
+  console.log(`드라이브 정리 ${apply ? '(실행)' : '(드라이런 — 옮기지 않았다)'} · 오늘 ${res.todayIso} · 옮길 것 ${res.moves.length} · 둘 것 ${res.keep.length}`);
+  for (const mv of res.moves) console.log(`   ${apply ? '→' : '·'} ${mv.from}  →  ${mv.to}   (${mv.why})`);
+  if (res.keep.length) console.log(`   둠: ${res.keep.map((k) => k.name).join(' · ')}`);
+  if (apply) {
+    console.log(`   옮김 ${res.moved.length} · 실패 ${res.failed.length}`);
+    for (const f of res.failed) console.log(`   ⛔ ${f.from}: ${f.err}`);
+  }
+}
+
 // ---------- 단독 CLI 실행 ----------
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 if (isMain) {
-  const args = { manifest: null, slug: null, out: null };
+  const args = { manifest: null, slug: null, out: null, archive: false, apply: false };
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--manifest') args.manifest = argv[++i];
     else if (argv[i] === '--slug') args.slug = argv[++i];
     else if (argv[i] === '--out') args.out = argv[++i];
+    else if (argv[i] === '--archive') args.archive = true;   // 드라이브 정리 — 기본은 드라이런
+    else if (argv[i] === '--apply') args.apply = true;       // --archive 와 함께일 때만 실제로 옮긴다
   }
-  if (!args.out) throw new Error('사용법: node reel-caption.mjs --slug <슬러그> --out <txt경로> [--manifest <post.json 경로>]');
+  if (args.archive) {
+    //   node reel-caption.mjs --archive            옮길 목록만 (드라이런)
+    //   node reel-caption.mjs --archive --apply    실제로 옮긴다 (사용자가 목록을 확인한 뒤)
+    const res = archiveDriveOld({ apply: args.apply });
+    printDrivePlan(res, { apply: args.apply });
+    process.exit(res.ok && (!args.apply || res.failed.length === 0) ? 0 : 1);
+  }
+  if (!args.out) throw new Error('사용법: node reel-caption.mjs --slug <슬러그> --out <txt경로> [--manifest <post.json 경로>]  |  --archive [--apply]');
   const manifestPath = args.manifest ? resolve(HERE, args.manifest) : findManifest(args.slug);
   if (!manifestPath) throw new Error(`매니페스트를 못 찾음 — --manifest 직접 지정하거나 --slug 확인 (post-${args.slug}.json)`);
   const caption = writeReelCaption(manifestPath, resolve(HERE, args.out));

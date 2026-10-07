@@ -1,0 +1,1194 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>motion cuts</title>
+<style>html,body{margin:0;padding:0;background:#000;overflow:hidden}canvas{display:block}</style>
+</head><body><canvas id="c"></canvas>
+<script>
+'use strict';
+// ─────────────────────────────────────────────────────────────────────────────
+// 모션 컷 장면 라이브러리. 계약은 하나 — window.frame(t) (t = 컷 안의 초).
+// CSS 애니메이션·rAF·벽시계·시드 없는 난수 없음.
+// 색·폰트·글자 구역은 이 파일에 적지 않는다: render-cuts.mjs 가 palette.mjs · safe-zone.mjs 를
+// import 해서 window.setup() 으로 넘긴다. 이 파일에 숫자로 박힌 것은 구도(비율)뿐이다.
+// 화면 글자는 전부 컷 JSON 필드에서만 온다 — 여기서 문자열 리터럴을 그리지 않는다.
+//
+// 바탕(ground) 두 벌 — 장면 코드는 palette 키를 직접 안 쓰고 역할(R)만 쓴다:
+//   dark   : bg 바탕 · text 글자 (터미널과 같은 바탕 = 지난 시제품)
+//   accent : accent 바탕 · onAccent 글자 (palette 가 「강조 배경 위에 얹는 글자색」으로 정의한 짝)
+//            danger 는 accent 위에서 대비가 안 나와서 **bg 칩 위에** 얹는다.
+// ─────────────────────────────────────────────────────────────────────────────
+let W = 1080, H = 1920, P = null, F = null, Z = null, S = 1, CUT = null, FPS = 24, R = null, GROUND0 = null, LAYOUT0 = 'left', CENTER = false;
+let ZFULL = null, ZUP = null, S0 = 1, FS = 1, FILL = null;
+// marks: scene = 글자 구역 모서리 괄호 + 신호등 점(기본 · 예전 판) · edge = 프레임 가장자리 모서리만 · none = 괄호·점 없음
+let MARKS = 'edge', FILLBOTTOM = false;   // 2026-09-29 사용자 결정: 기본 edge · none 은 후보 · scene 은 V-D·V-E 호환용   // center: 버튼 열 위쪽 구역(ZUP)에 들어가면 그쪽 · FS = 글자 배율
+const SAMPLES = 3, SHUTTER = 0.5;
+const cv = document.getElementById('c'); const mc = cv.getContext('2d');
+const oc = document.createElement('canvas'); const ox = oc.getContext('2d');
+
+const TAU = Math.PI * 2;
+const clamp = (x, a = 0, b = 1) => x < a ? a : x > b ? b : x;
+const lerp = (a, b, t) => a + (b - a) * t;
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const E = {
+  outCubic: t => 1 - Math.pow(1 - t, 3),
+  inOutCubic: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  outExpo: t => t >= 1 ? 1 : 1 - Math.pow(2, -10 * t),
+  inOutExpo: t => t <= 0 ? 0 : t >= 1 ? 1 : t < .5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2,
+  outBack: t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+};
+function hash(a, b = 0, c = 0) {
+  let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263) + Math.imul(c | 0, 1442695041)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296;
+}
+function rgba(hex, a) { const h = hex.slice(1); const f = h.length === 3 ? h.split('').map(c => c + c).join('') : h; const n = parseInt(f, 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`; }
+
+function roles(ground) {
+  if (ground === 'accent') return {
+    ground: P.accent, ink: P.onAccent, sub: P.onAccent, hi: P.onAccent,
+    bad: P.danger, chip: P.bg,                 // danger 글자는 bg 칩 위
+    hiChipFg: P.accent,                        // 강조 낱말: bg 칩 위 accent 글자 (반전)
+    alarm: P.bg, grid: rgba(P.onAccent, 0.13), glow: P.text, glowA: 0.28, mark: P.onAccent,
+    card: rgba(P.onAccent, 0.14), track: rgba(P.onAccent, 0.16), gauge: rgba(P.onAccent, 0.16), trackLine: P.onAccent, tick: rgba(P.onAccent, 0.45),
+    scan: rgba(P.onAccent, 0.10), lighter: false, setA: P.onAccent, setB: P.text,
+    ghost: [P.danger, P.bg], blocks: [P.onAccent, P.bg, P.text],
+  };
+  return {
+    ground: P.bg, ink: P.text, sub: P.dim, hi: P.accent, bad: P.danger, chip: null, hiChipFg: null,
+    alarm: P.danger, grid: rgba(P.line, 0.45), glow: null, glowA: 0.16, mark: P.accentDim,
+    card: P.panel, track: P.panel, gauge: P.line, trackLine: P.line, tick: rgba(P.dim, 0.35),
+    scan: 'rgba(0,0,0,0.28)', lighter: true, setA: P.accent, setB: P.info,
+    ghost: [P.danger, P.info], blocks: [P.accent, P.info, P.danger],
+  };
+}
+
+// ── 글자: 그릴 때마다 잉크 상자·글자색·밑색을 기기 좌표로 기록한다 (렌더러가 구역·대비를 검사) ──
+let BOXES = [], CLIP = null;
+function setFont(g, px, fam, w) { g.font = `${w} ${px}px ${fam === 'mono' ? F.mono : F.sans}`; g.letterSpacing = '0px'; }
+function ink(g, str, px, fam, w) { setFont(g, px, fam, w); const m = g.measureText(str); return { l: m.actualBoundingBoxLeft, r: m.actualBoundingBoxRight, a: m.actualBoundingBoxAscent, d: m.actualBoundingBoxDescent, w: m.actualBoundingBoxLeft + m.actualBoundingBoxRight, h: m.actualBoundingBoxAscent + m.actualBoundingBoxDescent }; }
+function fit(str, fam, w, maxW, maxH) { const k = ink(mc, str, 100, fam, w); let px = 100 * maxW / k.w; if (maxH) px = Math.min(px, 100 * maxH / k.h); return px * FS; }
+// (x, y) = 잉크 기준점. align: 'l' | 'c' | 'r' (가로 잉크 기준), y 는 잉크 세로 중심
+// o.on = 이 글자 밑의 색(대비 검사용) · o.decor = 장식 사본(대비 검사 제외, 구역 검사는 한다)
+// o.chip = 글자 뒤에 칩을 깐다 (색)
+function text(g, str, x, y, px, o = {}) {
+  const fam = o.fam || 'sans', w = o.w || 800, k = ink(g, str, px, fam, w);
+  const dx = o.align === 'c' ? x - k.w / 2 + k.l : o.align === 'r' ? x - k.r : x + k.l;
+  const by = y + (k.a - k.d) / 2;
+  if (o.chip) { const p = px * 0.12; g.fillStyle = o.chip; g.beginPath(); g.roundRect(dx - k.l - p, by - k.a - p, k.w + 2 * p, k.h + 2 * p, p); g.fill(); }
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillStyle = o.color || R.ink; g.fillText(str, dx, by);
+  if (g.globalAlpha < 0.02) return k;
+  const T = g.getTransform();
+  const pts = [[dx - k.l, by - k.a], [dx + k.r, by - k.a], [dx - k.l, by + k.d], [dx + k.r, by + k.d]].map(([px2, py2]) => [T.a * px2 + T.c * py2 + T.e, T.b * px2 + T.d * py2 + T.f]);
+  let b = { str, x0: Math.min(...pts.map(p => p[0])), x1: Math.max(...pts.map(p => p[0])), y0: Math.min(...pts.map(p => p[1])), y1: Math.max(...pts.map(p => p[1])) };
+  const full = (b.x1 - b.x0) * (b.y1 - b.y0), ux0 = b.x0, ux1 = b.x1;   // 클립 전 가로 끝 (구역 고르기가 클립에 속지 않게)
+  if (CLIP) { b = { str, x0: Math.max(b.x0, CLIP.x0), x1: Math.min(b.x1, CLIP.x1), y0: Math.max(b.y0, CLIP.y0), y1: Math.min(b.y1, CLIP.y1) }; if (b.x1 <= b.x0 || b.y1 <= b.y0) return k; }
+  b.ux0 = ux0; b.ux1 = ux1; b.jitter = !!o.jitter;
+  b.shown = full > 0 ? ((b.x1 - b.x0) * (b.y1 - b.y0)) / full : 1; b.alpha = g.globalAlpha;
+  b.fg = o.nominal || o.color || R.ink; b.on = o.chip || o.on || R.ground; b.px = px * Math.abs(T.a); b.decor = !!o.decor;
+  BOXES.push(b); return k;
+}
+// 나쁜 값: dark 바탕은 danger 글자, accent 바탕은 bg 칩 위 danger 글자
+const bad = (o = {}) => ({ ...o, color: R.bad, chip: R.chip || undefined });
+// 강조 낱말: dark 는 accent 글자, accent 는 bg 칩 위 accent 글자
+const hiWord = (o = {}) => R.hiChipFg ? { ...o, color: R.hiChipFg, chip: R.chip } : { ...o, color: R.hi };
+// 사각 클립 (변환 없는 좌표에서만 쓴다) — 클립 안 잉크만 기록되게 CLIP 을 같이 들고 간다
+function clipRect(g, x0, y0, x1, y1) { g.beginPath(); g.rect(x0, y0, x1 - x0, y1 - y0); g.clip(); const T = g.getTransform(); const c = { x0: T.a * x0 + T.e, y0: T.d * y0 + T.f, x1: T.a * x1 + T.e, y1: T.d * y1 + T.f }; CLIP = CLIP ? { x0: Math.max(CLIP.x0, c.x0), y0: Math.max(CLIP.y0, c.y0), x1: Math.min(CLIP.x1, c.x1), y1: Math.min(CLIP.y1, c.y1) } : c; }
+
+// ── 공통 바탕: 글자 없는 장식만 (격자 · 글로우 · 크롭 마크 · 신호등) ──
+function base(g, t, glow) {
+  g.fillStyle = R.ground; g.fillRect(0, 0, W, H);
+  const gs = 54 * S; g.strokeStyle = R.grid; g.lineWidth = 1;
+  g.beginPath(); for (let x = gs; x < W; x += gs) { g.moveTo(x + 0.5, 0); g.lineTo(x + 0.5, H); } for (let y = gs; y < H; y += gs) { g.moveTo(0, y + 0.5); g.lineTo(W, y + 0.5); } g.stroke();
+  const gc = R.glow || glow || P.accent;
+  const gx0 = CENTER ? W / 2 : Z.cx;   // center: 떠 있는 장식은 프레임 중심
+  const gr = g.createRadialGradient(gx0, Z.cy, 0, gx0, Z.cy, Math.max(W, H) * 0.6);
+  gr.addColorStop(0, rgba(gc, R.glowA)); gr.addColorStop(1, rgba(gc, 0)); g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  if (MARKS === 'scene') {
+  const L = 34 * S, m = 22 * S; g.strokeStyle = R.mark; g.lineWidth = 3 * S; g.beginPath();
+  const hw = Math.max(W / 2 - Z.x0, Z.x1 - W / 2), mx0 = CENTER ? W / 2 - hw : Z.x0, mx1 = CENTER ? W / 2 + hw : Z.x1;
+  for (const [x, y, sx, sy] of [[mx0 - m, Z.y0 - m, 1, 1], [mx1 + m, Z.y0 - m, -1, 1], [mx0 - m, Z.y1 + m, 1, -1], [mx1 + m, Z.y1 + m, -1, -1]]) { g.moveTo(x, y + L * sy); g.lineTo(x, y); g.lineTo(x + L * sx, y); }
+  g.stroke();
+  P.dots.forEach((c, i) => { g.fillStyle = c; g.beginPath(); g.arc(mx0 + 10 * S + i * 30 * S, Z.y0 - m - 26 * S, 8 * S, 0, TAU); g.fill(); });
+  } else if (MARKS === 'edge') {   // 프레임 가장자리 표시 — 글자를 감싸지 않는다 (크기는 배율과 무관하게 S0)
+    const e = 40 * S0, L = 34 * S0; g.strokeStyle = R.mark; g.lineWidth = 3 * S0; g.beginPath();
+    for (const [x, y, sx, sy] of [[e, e, 1, 1], [W - e, e, -1, 1], [e, H - e, 1, -1], [W - e, H - e, -1, -1]]) { g.moveTo(x, y + L * sy); g.lineTo(x, y); g.lineTo(x + L * sx, y); }
+    g.stroke();
+    P.dots.forEach((c, i) => { g.fillStyle = c; g.beginPath(); g.arc(e + 16 * S0 + i * 30 * S0, e + 30 * S0, 8 * S0, 0, TAU); g.fill(); });
+  }   // none: 괄호도 점도 없다
+}
+function ring(g, x, y, r, col, a, lw) { if (a <= 0) return; g.strokeStyle = rgba(col, a); g.lineWidth = lw; g.beginPath(); g.arc(x, y, r, 0, TAU); g.stroke(); }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 컷 타입. draw(g, t, d, c) — c = 컷 JSON 한 칸
+// ═════════════════════════════════════════════════════════════════════════════
+const TYPES = {};
+
+// 1) 숫자 펀치 — a.value 가 박히고, 세로로 굴러 b.value 로 바뀐다
+TYPES.numberPunch = (g, t, d, c) => {
+  const sA = c.switchSec != null ? c.switchSec / d : (c.switchAt ?? 0.40), sL = c.switchLenSec != null ? c.switchLenSec / d : (c.switchLen ?? 0.14);
+  const sw = E.inOutExpo(seg(t, d * sA, d * (sA + sL)));
+  base(g, t, sw > 0.5 ? P.danger : P.accent);
+  const K = !!R.chip;   // 칩을 까는 바탕이면 칩 여백만큼 간격을 넓힌다 (dark 는 지난 시제품과 같은 값)
+  const vf = K ? 0.78 : 0.82, vhf = K ? 0.28 : 0.3;
+  const vpx = Math.min(fit(c.a.value, 'sans', 900, Z.w * vf, Z.h * vhf), fit(c.b.value, 'sans', 900, Z.w * vf, Z.h * vhf));
+  const vk = ink(g, c.a.value, vpx, 'sans', 900), vh = vk.h;
+  const lpx = Math.min(72 * S, Z.w * 0.12), cy = Z.cy + Z.h * 0.05, ly = cy - vh * 0.5 - lpx * (K ? 1.4 : 1.3);
+  const win = { x0: Z.x0, y0: ly - lpx, x1: Z.x1, y1: cy + vh * (K ? 0.66 : 0.62) };
+  const p1 = seg(t, 0.02, d * 0.5); ring(g, Z.cx, cy, vh * 0.5 + E.outExpo(p1) * Z.w * 0.6, R.hi, (1 - p1) * 0.7, 6 * S);
+  const p2 = seg(t, d * 0.5, d); ring(g, Z.cx, cy, vh * 0.4 + E.outExpo(p2) * Z.w * 0.6, R.alarm, (1 - p2) * 0.7, 6 * S);
+  g.save(); clipRect(g, win.x0, win.y0, win.x1, win.y1);
+  const roll = vh * (K ? 1.6 : 1.5);
+  if (sw < 1) {
+    const inA = E.outBack(seg(t, 0, 0.16)), sc = lerp(0.62, 1, inA);
+    g.save(); g.globalAlpha = 1 - sw;
+    text(g, c.a.label, Z.cx, ly - sw * roll, lpx, { align: 'c', w: 800, color: R.sub });
+    g.translate(Z.cx, cy - sw * roll); g.scale(sc, sc);
+    text(g, c.a.value, 0, 0, vpx, { align: 'c', w: 900, color: R.hi });
+    g.restore();
+  }
+  if (sw > 0) {
+    const shake = (1 - seg(t, d * (sA + sL), d * (sA + sL + 0.16))) * 10 * S;
+    g.save(); g.globalAlpha = sw;
+    text(g, c.b.label, Z.cx, ly + (1 - sw) * roll, lpx, { align: 'c', w: 800, color: R.sub });
+    g.translate(Z.cx + Math.sin(t * 150) * shake, cy + (1 - sw) * roll);
+    text(g, c.b.value, 0, 0, vpx, bad({ align: 'c', w: 900 }));
+    g.restore();
+  }
+  g.restore(); CLIP = null;
+  const gy = win.y1 + 40 * S, gw = Z.w * 0.7, gx = Z.cx - gw / 2;
+  g.fillStyle = R.gauge; g.fillRect(gx, gy, gw, 12 * S);
+  g.fillStyle = R.hi; g.fillRect(gx, gy, gw * (1 - sw) * E.outCubic(seg(t, 0.04, 0.3)), 12 * S);
+  if (c.caption) { const cp = Math.min(fit(c.caption, 'mono', 700, Z.w * 0.97), 40 * S); text(g, c.caption, Z.x0, Z.y0 + cp * 0.9, cp, { fam: 'mono', w: 700, color: R.sub }); }
+  if (c.notes) { const np = Math.min(46 * S, Z.w * 0.068); c.notes.forEach((n, i) => text(g, n, Z.x0, Z.y1 - np * 0.8 - (c.notes.length - 1 - i) * np * 1.5, np, { w: 800, color: R.sub })); }
+};
+
+// 2) 대비 카운터 — 두 줄이 같이 세기 시작하고 한 줄만 올라간다
+TYPES.contrastCounter = (g, t, d, c) => {
+  base(g, t);
+  const rows = c.rows, maxV = Math.max(...rows.map(r => r.value), 1);
+  const lpx = Math.min(60 * S, Z.w * 0.09), npx = Math.min(fit('00', 'sans', 900, Z.w * 0.42), Z.h * 0.2);
+  const nk = ink(g, '00', npx, 'sans', 900);
+  const K = !!R.chip, g1 = (K ? 34 : 24) * S, g2 = (K ? 38 : 28) * S;
+  const barH = 20 * S, blockH = lpx * 1.1 + g1 + nk.h + g2 + barH, gap = 90 * S;
+  const fpx = Math.min(44 * S, Z.w * 0.065);
+  const tpx = c.title ? Math.min(64 * S, Z.w * 0.095) : 0, tH = c.title ? tpx * 1.2 + 56 * S : 0;
+  const total = tH + rows.length * blockH + (rows.length - 1) * gap + (c.foot ? fpx * 2.6 : 0);
+  let y = Z.cy - total / 2;
+  if (c.title) { const ta = E.outExpo(seg(t, 0, 0.15)); g.save(); g.globalAlpha = ta; text(g, c.title, Z.x0, y + tpx * 0.6, tpx, { w: 900, color: R.ink }); g.restore();
+    g.fillStyle = R.hi; g.fillRect(Z.x0, y + tpx * 1.2 + 14 * S, Z.w * E.outCubic(seg(t, 0.05, 0.3)), 5 * S); y += tH; }
+  const cS = c.countSec || [0.06, d * 0.6];
+  const prog = E.outCubic(seg(t, cS[0], cS[1]));
+  const pS = c.popSec != null ? [c.popSec, c.popSec + d * 0.14] : [d * 0.58, d * 0.72];
+  rows.forEach((r, i) => {
+    const a = E.outExpo(seg(t, i * 0.05, 0.2 + i * 0.05)), dx = (1 - a) * -Z.w * 0.4;
+    const good = r.tone !== 'bad';
+    g.save(); clipRect(g, Z.x0, Z.y0, Z.x1, Z.y1); g.globalAlpha = a; g.translate(dx, 0);
+    text(g, r.label, Z.x0, y + lpx * 0.55, lpx, { w: 800, color: R.sub });
+    const v = Math.round(r.value * prog);
+    const ny = y + lpx * 1.1 + g1 + nk.h / 2;
+    const pop = !good ? 1 + 0.08 * Math.sin(Math.PI * seg(t, pS[0], pS[1])) : 1;
+    const nx = Z.x0 + (R.chip && !good ? npx * 0.12 : 0);   // 칩이 구역 밖으로 안 나가게
+    g.save(); g.translate(nx, ny); g.scale(pop, pop); text(g, String(v), 0, 0, npx, good ? { w: 900, color: R.ink } : bad({ w: 900 })); g.restore();
+    const by = ny + nk.h / 2 + g2;
+    g.fillStyle = R.track; g.fillRect(Z.x0, by, Z.w, barH);
+    g.strokeStyle = R.trackLine; g.lineWidth = 2 * S; g.strokeRect(Z.x0, by, Z.w, barH);
+    const bw = Z.w * (r.value / maxV) * prog;
+    if (bw > 0) { g.fillStyle = good ? R.hi : R.alarm; g.fillRect(Z.x0, by, bw, barH); }
+    else { const bl = Math.floor(t * FPS / 3) % 2; if (bl) { g.fillStyle = R.alarm; g.fillRect(Z.x0, by - 6 * S, 6 * S, barH + 12 * S); } }
+    g.fillStyle = R.tick; for (let k = 1; k < maxV; k++) g.fillRect(Z.x0 + Z.w * k / maxV, by + barH + 6 * S, 2 * S, 8 * S);
+    g.restore(); CLIP = null;
+    y += blockH + gap;
+  });
+  const fa = E.outExpo(seg(t, d * 0.5, d * 0.7));
+  if (fa > 0 && c.foot) { g.save(); g.globalAlpha = fa; text(g, c.foot, Z.x0, y - gap + fpx * 1.6 + (1 - fa) * 20 * S, fpx, { fam: 'mono', w: 700, color: R.sub }); g.restore(); }
+};
+
+// 3) 키네틱 타이포 — 낱말이 한 줄씩 마스크에서 올라오고, 소리 파형이 평평해진다
+TYPES.kinetic = (g, t, d, c) => {
+  base(g, t);
+  const words = c.words, last = words.length - 1;
+  // 칩을 까는 바탕에서는 마지막 낱말을 칩 여백만큼 줄인다 (dark 는 지난 시제품과 같다)
+  const fw = c.fitW ?? 1;   // 1 = 지난 시제품 값. 가장자리 반올림 여유가 필요하면 JSON 에서 줄인다
+  let pxs = words.map((w, i) => fit(w, 'sans', 900, Z.w * fw * (i === last && R.chip ? 0.83 : 1))); let ks = pxs.map((p, i) => ink(g, words[i], p, 'sans', 900));
+  const wave = c.wave || (c.mute ? 'flat' : null);
+  const gap = (R.chip ? 34 : 26) * S, waveH = wave ? 150 * S : 0;
+  let tot = ks.reduce((a, k) => a + k.h, 0) + gap * (words.length - 1) + waveH;
+  const lim = Z.h * 0.86 * FS; if (tot > lim) { const f = (lim - waveH) / (tot - waveH); pxs = pxs.map(p => p * f); ks = pxs.map((p, i) => ink(g, words[i], p, 'sans', 900)); tot = lim; }
+  let y = CENTER ? Z.cy - (tot - waveH) / 2 : Z.cy - tot / 2;   // center: 글자 블록 중심 = 구역 중심 (파형은 아래 장식)
+  words.forEach((w, i) => {
+    const k = ks[i], p = E.outExpo(seg(t, i * 0.09, 0.2 + i * 0.09));
+    const pad = R.chip && i === last ? pxs[i] * 0.14 : 8 * S;
+    g.save(); clipRect(g, 0, y - pad, W, y + k.h + pad);
+    text(g, w, Z.cx, y + k.h / 2 + (1 - p) * k.h * 1.3, pxs[i], i === last ? hiWord({ align: 'c', w: 900 }) : { align: 'c', w: 900, color: R.ink });
+    g.restore(); CLIP = null;
+    y += k.h + gap;
+  });
+  if (!wave) return;
+  if (wave === 'pulse') { pulseLine(g, t, y + waveH / 2 - gap / 2); return; }
+  const wy = y + waveH / 2 - gap / 2, amp = 46 * S * (1 - E.inOutCubic(seg(t, 0.22, 0.52)));
+  const band0 = CENTER ? W / 2 - Z.w / 2 : Z.x0, band1 = CENTER ? W / 2 + Z.w / 2 : Z.x1;
+  const ix = band0 + 30 * S, iw = 60 * S;
+  g.fillStyle = R.sub; g.beginPath(); g.moveTo(ix - 26 * S, wy - 14 * S); g.lineTo(ix - 10 * S, wy - 14 * S); g.lineTo(ix + 10 * S, wy - 32 * S); g.lineTo(ix + 10 * S, wy + 32 * S); g.lineTo(ix - 10 * S, wy + 14 * S); g.lineTo(ix - 26 * S, wy + 14 * S); g.closePath(); g.fill();
+  const xa = seg(t, 0.4, 0.55); if (xa > 0) { g.strokeStyle = R.alarm; g.lineWidth = 6 * S; g.lineCap = 'round'; g.beginPath(); g.moveTo(ix + 22 * S, wy - 16 * S); g.lineTo(ix + 22 * S + 30 * S * xa, wy - 16 * S + 32 * S * xa); g.moveTo(ix + 52 * S, wy - 16 * S); g.lineTo(ix + 52 * S - 30 * S * xa, wy - 16 * S + 32 * S * xa); g.stroke(); }
+  const x0 = ix + iw + 20 * S, x1 = band1;
+  g.strokeStyle = amp > 2 * S ? R.hi : R.sub; g.lineWidth = 5 * S; g.lineJoin = 'round'; g.beginPath();
+  for (let k = 0; k <= 120; k++) { const u = k / 120, x = lerp(x0, x1, u); const yy = wy + Math.sin(u * 26 - t * 40) * amp * Math.sin(Math.PI * u); k ? g.lineTo(x, yy) : g.moveTo(x, yy); }
+  g.stroke();
+};
+
+// 4) 글리치 등식 — eq 가 채널 분리·조각 어긋남으로 깨지고 reveal 이 뜬다 (전부 구역 안에 클립)
+TYPES.glitchEquation = (g, t, d, c) => {
+  const bS = c.breakSec ?? d * 0.45, bL = c.breakLenSec ?? d * 0.15;
+  base(g, t, t > bS + bL / 3 ? P.danger : P.info);
+  const cpx = Math.min(48 * S, Z.w * 0.075 * FS);
+  const epx = fit(c.eq, 'sans', 900, Z.w * 0.92, Z.h * 0.16), ek = ink(g, c.eq, epx, 'sans', 900);
+  const rpx = fit(c.reveal, 'sans', 900, Z.w * (R.chip ? 0.72 : 0.8), Z.h * 0.2), rk = ink(g, c.reveal, rpx, 'sans', 900);
+  const cy = c._cy ?? Z.cy;
+  text(g, c.caption, CENTER ? Z.cx : Z.x0, cy - Math.max(ek.h, rk.h) / 2 - cpx * (R.chip ? 2.4 : 2.2), cpx, { fam: 'mono', w: 700, color: R.sub, ...(CENTER ? { align: 'c' } : {}) });
+  const b = Math.floor(t * FPS / 2);
+  const brk = seg(t, bS, bS + bL);
+  const gi = clamp(seg(t, c.breakSec != null ? bS * 0.27 : d * 0.12, bS) * 0.8 + (hash(b, 7) > 0.55 ? 0.35 : 0) + brk * 1.5, 0, 2.2);
+  const top = cy - ek.h / 2 - 12 * S, hgt = ek.h + 24 * S, nS = 12;
+  g.save(); clipRect(g, Z.x0, Z.y0, Z.x1, Z.y1);
+  if (brk < 1) {
+    g.globalAlpha = 1 - brk;
+    for (let s = 0; s < nS; s++) {
+      const y0 = top + hgt * s / nS; const off = hash(b, s, 3) > 0.55 - brk * 0.4 ? (hash(b, s, 4) - 0.5) * gi * 140 * S : 0;
+      g.save(); g.beginPath(); g.rect(0, y0, W, hgt / nS + 1); g.clip();
+      if (R.lighter) {   // 어두운 바탕: 가산 합성 RGB 분리 (세 채널이 겹치면 흰 글자)
+        g.globalCompositeOperation = 'lighter';
+        text(g, c.eq, Z.cx + off - gi * 12 * S, cy - gi * 2 * S, epx, { align: 'c', w: 900, color: R.ghost[0], decor: true });
+        text(g, c.eq, Z.cx + off, cy, epx, { align: 'c', w: 900, color: P.accent, nominal: R.ink, jitter: off !== 0 });
+        text(g, c.eq, Z.cx + off + gi * 12 * S, cy + gi * 2 * S, epx, { align: 'c', w: 900, color: R.ghost[1], decor: true });
+        g.globalCompositeOperation = 'source-over';
+      } else {           // 밝은 바탕: 가산이 하얗게 날아가서 사본을 뒤에 깔고 본 글자를 위에 얹는다
+        text(g, c.eq, Z.cx + off - gi * 12 * S, cy - gi * 2 * S, epx, { align: 'c', w: 900, color: R.ghost[0], decor: true });
+        text(g, c.eq, Z.cx + off + gi * 12 * S, cy + gi * 2 * S, epx, { align: 'c', w: 900, color: R.ghost[1], decor: true });
+        text(g, c.eq, Z.cx + off, cy, epx, { align: 'c', w: 900, color: R.ink, jitter: off !== 0 });
+      }
+      g.restore();
+    }
+    g.globalAlpha = 1;
+  }
+  if (brk > 0) {
+    const settle = 1 - (c.breakSec != null ? seg(t, bS + bL, bS + bL + 0.3) : seg(t, d * 0.6, d * 0.85)), rb = Math.floor(t * FPS);
+    g.globalAlpha = E.outExpo(brk);
+    const pad = R.chip ? rpx * 0.12 : 0;
+    const rtop = cy - rk.h / 2 - 10 * S - pad, rh = rk.h + 20 * S + 2 * pad;
+    for (let s = 0; s < 8; s++) {
+      const y0 = rtop + rh * s / 8, off = hash(rb, s, 9) > 0.6 ? (hash(rb, s, 10) - 0.5) * settle * 80 * S : 0;
+      g.save(); g.beginPath(); g.rect(0, y0, W, rh / 8 + 1); g.clip();
+      text(g, c.reveal, Z.cx + off, cy, rpx, bad({ align: 'c', w: 900, jitter: off !== 0 }));
+      g.restore();
+    }
+    g.globalAlpha = 1;
+  }
+  g.restore(); CLIP = null;
+  g.fillStyle = R.scan; for (let y = 0; y < H; y += 4 * S) g.fillRect(0, y, W, 1.5 * S);
+  if (gi > 0.7) for (let k = 0; k < 6; k++) { if (hash(b, k, 41) < 0.45) continue; g.fillStyle = rgba(R.blocks[k % 3], 0.8); g.fillRect(hash(b, k, 42) * W, lerp(top - 200 * S, top + hgt + 200 * S, hash(b, k, 43)), (20 + hash(b, k, 44) * 160) * S, (4 + hash(b, k, 45) * 26) * S); }
+  // note 는 스캔라인·블록 노이즈 **위에** 그린다 (가려지면 못 읽는다)
+  if (c.note) { const npx = Math.min(fit(c.note, 'sans', 800, Z.w * 0.97), 58 * S); text(g, c.note, CENTER ? Z.cx : Z.x0, cy + Math.max(ek.h, rk.h) / 2 + 150 * S, npx, { w: 800, color: R.ink, ...(CENTER ? { align: 'c' } : {}) }); }
+};
+
+// 5) 집합 갈림 — eq 두 묶음이 겹쳐 들어오지만 바깥 점이 남는다 (갈린 개수는 글자로 안 쓴다)
+TYPES.setSplit = (g, t, d, c) => {
+  base(g, t, P.info);
+  const cpx = Math.min(44 * S, Z.w * 0.064), spx = Math.min(52 * S, Z.w * 0.076);
+  const epx = fit(c.eq, 'sans', 900, Z.w * 0.78, Z.h * 0.13), ek = ink(g, c.eq, epx, 'sans', 900);
+  const Rr = Math.min(Z.w * 0.32, Z.h * 0.2);
+  const blockH = cpx * 1.2 + 16 * S + spx * 1.2 + 40 * S + ek.h + 70 * S + Rr * 2;
+  let y = Z.cy - blockH / 2;
+  const ta = E.outExpo(seg(t, 0, 0.18));
+  g.save(); g.globalAlpha = ta;
+  text(g, c.caption, Z.x0, y + cpx * 0.6, cpx, { fam: 'mono', w: 700, color: R.sub }); y += cpx * 1.2 + 16 * S;
+  text(g, c.sub, Z.x0, y + spx * 0.6, spx, { w: 800, color: R.sub }); y += spx * 1.2 + 40 * S;
+  g.restore();
+  const ey = y + ek.h / 2, ep = E.outBack(seg(t, 0.06, 0.26));
+  g.save(); g.translate(Z.cx, ey); g.scale(lerp(0.7, 1, ep), lerp(0.7, 1, ep)); g.globalAlpha = clamp(ep * 1.5);
+  text(g, c.eq, 0, 0, epx, { align: 'c', w: 900, color: R.ink }); g.restore();
+  y += ek.h + 70 * S;
+  setDots(g, t, d, c, Z.cx, y + Rr, Rr);
+};
+function setDots(g, t, d, c, cx, cy, Rr) {
+  const off = Rr * 0.3;
+  const n = c.n > 0 ? c.n : 0, k = c.apart > 0 ? c.apart : 0, shared = n - k;   // ⛔ 기본 끔 — 켜려면 nSource · apartSource 필수
+  const conv = E.outExpo(seg(t, 0.08, d * 0.55)), fly = (1 - conv) * W * 0.6;
+  const sharedPts = []; for (let i = 0; i < shared; i++) { const r = Rr * 0.6 * Math.sqrt((i + 0.5) / shared), a = i * 2.39996; sharedPts.push([cx + Math.cos(a) * r * 0.62, cy + Math.sin(a) * r]); }
+  const own = (side) => Array.from({ length: k }, (_, i) => [cx + side * (off + Rr * 0.55), cy + (k === 1 ? 0 : lerp(-0.34, 0.34, i / (k - 1))) * Rr]);
+  const groups = [[R.setA, -1, [...sharedPts, ...own(-1)], 14], [R.setB, 1, [...sharedPts, ...own(1)], R.lighter ? 14 : 8]];
+  if (R.lighter) g.globalCompositeOperation = 'lighter';
+  for (const [col, side, pts, dr] of groups) {
+    const gx = side * (off + fly);
+    g.strokeStyle = rgba(col, R.lighter ? 0.9 : 0.95); g.lineWidth = 4 * S; g.beginPath(); g.arc(cx + gx, cy, Rr, 0, TAU); g.stroke();
+    g.fillStyle = rgba(col, R.lighter ? 0.9 : 0.95);
+    pts.forEach(([px, py], i) => { const r = i >= shared ? 14 : dr; g.beginPath(); g.arc(px + side * fly, py, r * S, 0, TAU); g.fill(); });
+  }
+  g.globalCompositeOperation = 'source-over';
+  const wa = seg(t, d * 0.55, d * 0.75);
+  if (wa > 0) for (const [, , pts] of groups) for (let i = shared; i < n; i++) { const [px, py] = pts[i]; const pr = seg(t, d * 0.55, d); ring(g, px, py, 22 * S + pr * 26 * S, R.alarm, (1 - pr * 0.6) * wa, 4 * S); }
+};
+
+
+// 심장 박동 선 + 살아 있음 점 (글자 없음)
+function pulseLine(g, t, wy) {
+  const b0 = CENTER ? W / 2 - Z.w / 2 : Z.x0, b1 = CENTER ? W / 2 + Z.w / 2 : Z.x1;
+  const x0 = b0 + 90 * S, x1 = b1, beat = 0.5;
+  const pr = 1 + 0.35 * Math.sin(Math.PI * clamp((t % beat) / 0.18));
+  g.fillStyle = R.hi; g.beginPath(); g.arc(b0 + 30 * S, wy, 16 * S * pr, 0, TAU); g.fill();
+  ring(g, b0 + 30 * S, wy, 16 * S + (t % beat) / beat * 40 * S, R.hi, 1 - (t % beat) / beat, 3 * S);
+  const head = seg(t, 0.05, 0.7);
+  g.strokeStyle = R.hi; g.lineWidth = 5 * S; g.lineJoin = 'round'; g.lineCap = 'round'; g.beginPath();
+  for (let k = 0; k <= 160; k++) {
+    const u = k / 160; if (u > head) break;
+    const x = lerp(x0, x1, u), ph = (u * 3) % 1;
+    const yy = ph > 0.42 && ph < 0.58 ? wy + Math.sin((ph - 0.42) / 0.16 * TAU) * -60 * S * (ph < 0.5 ? 1 : 0.55) : wy;
+    k ? g.lineTo(x, yy) : g.moveTo(x, yy);
+  }
+  g.stroke();
+}
+
+// 6) 명령 타이핑 — 프롬프트(모양) + cmd 가 한 글자씩 → result 가 박힌다
+TYPES.command = (g, t, d, c) => {
+  base(g, t);
+  const cw = Z.w, ch = 150 * S, cx0 = Z.x0, cy0 = Z.y0 + Z.h * 0.16;
+  g.fillStyle = R.card; g.beginPath(); g.roundRect(cx0, cy0, cw, ch, 18 * S); g.fill();
+  g.strokeStyle = R.trackLine; g.lineWidth = 2 * S; g.stroke();
+  const chev = 44 * S, pad = 30 * S;
+  g.strokeStyle = R.hi; g.lineWidth = 7 * S; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); g.moveTo(cx0 + pad, cy0 + ch / 2 - 16 * S); g.lineTo(cx0 + pad + 18 * S, cy0 + ch / 2); g.lineTo(cx0 + pad, cy0 + ch / 2 + 16 * S); g.stroke();
+  const tx = cx0 + pad + chev, maxW = cw - pad * 2 - chev - 30 * S;
+  const px = Math.min(fit(c.cmd, 'mono', 700, maxW), 46 * S);
+  const nch = Math.floor(seg(t, 0.03, c.typeEnd ?? 0.3) * c.cmd.length + 1e-6);
+  const shown = [...c.cmd].slice(0, nch).join('');
+  let cursorX = tx;
+  if (shown.length) { const k = text(g, shown, tx, cy0 + ch / 2, px, { fam: 'mono', w: 700, color: R.ink }); cursorX = tx + k.w + 8 * S; }
+  if (Math.floor(t * FPS / 4) % 2 === 0 || nch < c.cmd.length) { g.fillStyle = R.hi; g.fillRect(cursorX, cy0 + ch / 2 - px * 0.55, px * 0.55, px * 1.1); }
+  const ra = seg(t, (c.typeEnd ?? 0.3) + 0.06, (c.typeEnd ?? 0.3) + 0.26);
+  if (ra > 0) {
+    const rpx = fit(c.result, 'sans', 900, Z.w * 0.5, Z.h * 0.36), ry = cy0 + ch + (Z.y1 - cy0 - ch) / 2;
+    g.strokeStyle = R.sub; g.lineWidth = 4 * S; g.beginPath(); g.moveTo(Z.cx, cy0 + ch + 20 * S); g.lineTo(Z.cx, cy0 + ch + 20 * S + 60 * S * ra); g.stroke();
+    ring(g, Z.cx, ry, rpx * 0.4 + E.outExpo(ra) * Z.w * 0.4, R.hi, (1 - ra) * 0.8, 6 * S);
+    const sc = lerp(0.5, 1, E.outBack(ra));
+    g.save(); g.translate(Z.cx, ry); g.scale(sc, sc); text(g, c.result, 0, 0, rpx, { align: 'c', w: 900, color: R.ink }); g.restore();
+  }
+};
+
+// 7) 날짜 타임라인 — 두 날짜를 잇는 선 하나. ⛔ 중간 표시(marks)는 기본 끔 — 켜려면 marksSource 필수(lib.mjs 가 검사)
+TYPES.timeline = (g, t, d, c) => {
+  base(g, t);
+  const ax0 = Z.x0 + 16 * S, ax1 = Z.x1 - 16 * S, ay = Z.cy;
+  const dr = E.inOutCubic(seg(t, 0.05, 0.5));
+  g.strokeStyle = R.trackLine; g.lineWidth = 6 * S; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(ax0, ay); g.lineTo(lerp(ax0, ax1, dr), ay); g.stroke();
+  if (dr > 0.98 && !(c.marks > 0)) {   // 화살촉 하나 — 방향만 (개수·분포를 암시하지 않는다)
+    const ah = 22 * S; g.fillStyle = R.trackLine; g.beginPath(); g.moveTo(ax1 + 6 * S, ay); g.lineTo(ax1 - ah, ay - ah * 0.7); g.lineTo(ax1 - ah, ay + ah * 0.7); g.closePath(); g.fill();
+  }
+  const MK = c.marks > 0 ? c.marks : 0;
+  for (let k = 0; k < MK; k++) {
+    const u = MK === 1 ? 0 : k / (MK - 1), p = E.outBack(seg(dr, u - 0.02, u + 0.12));
+    if (p <= 0) continue;
+    const x = lerp(ax0, ax1, u);
+    g.fillStyle = R.hi; g.beginPath(); g.roundRect(x - 13 * S * p, ay - 32 * S * p, 26 * S * p, 34 * S * p, 4 * S); g.fill();
+    g.fillStyle = R.ground; g.fillRect(x - 7 * S * p, ay - 24 * S * p, 14 * S * p, 3 * S * p); g.fillRect(x - 7 * S * p, ay - 16 * S * p, 14 * S * p, 3 * S * p);
+  }
+  const lpx = Math.min(52 * S, Z.w * 0.078), dpx = Math.min(fit(c.from.date, 'mono', 700, Z.w * 0.42), 110 * S);
+  const fa = E.outExpo(seg(t, 0.02, 0.2));
+  if (fa > 0) { g.save(); g.globalAlpha = fa;
+    text(g, c.from.label, Z.x0, ay - 230 * S, lpx, { w: 800, color: R.sub });
+    text(g, c.from.date, Z.x0, ay - 140 * S, dpx, { fam: 'mono', w: 700, color: R.ink }); g.restore(); }
+  const ta = E.outExpo(seg(t, 0.42, 0.6));
+  if (ta > 0) { g.save(); g.globalAlpha = ta;
+    text(g, c.to.label, Z.x1, ay + 110 * S, lpx, { w: 800, color: R.sub, align: 'r' });
+    text(g, c.to.date, Z.x1, ay + 200 * S, dpx, { fam: 'mono', w: 700, color: R.ink, align: 'r' }); g.restore(); }
+};
+
+// 8) 지우기 — words 를 쌓고 strike 번째 낱말에 줄을 긋는다
+TYPES.strike = (g, t, d, c) => {
+  base(g, t);
+  const ws = c.words; const pxs = ws.map(w => fit(w, 'sans', 900, Z.w * (c.fitW ?? 0.97), Z.h * 0.22)); const ks = pxs.map((p, i) => ink(g, ws[i], p, 'sans', 900));
+  const gap = 30 * S, tot = ks.reduce((a, k) => a + k.h, 0) + gap * (ws.length - 1);
+  let y = Z.cy - tot / 2;
+  ws.forEach((w, i) => {
+    const k = ks[i], p = E.outExpo(seg(t, i * 0.08, 0.18 + i * 0.08));
+    g.save(); clipRect(g, 0, y - 8 * S, W, y + k.h + 8 * S);
+    text(g, w, Z.cx, y + k.h / 2 + (1 - p) * k.h * 1.3, pxs[i], { align: 'c', w: 900, color: R.ink });
+    g.restore(); CLIP = null;
+    if (i === c.strike) {
+      const sp = E.inOutCubic(seg(t, 0.3, 0.5)); if (sp > 0) {
+        g.strokeStyle = R.alarm; g.lineWidth = Math.max(10 * S, k.h * 0.1); g.lineCap = 'round';
+        const x0 = Z.cx - k.w / 2 - 10 * S, x1 = Z.cx + k.w / 2 + 10 * S;
+        g.beginPath(); g.moveTo(x0, y + k.h * 0.55); g.lineTo(lerp(x0, x1, sp), y + k.h * 0.45); g.stroke();
+      }
+    }
+    y += k.h + gap;
+  });
+};
+
+// 9) 도장 — 달력 한 장이 넘어가고 체크가 찍힌 뒤 a / b
+TYPES.stamp = (g, t, d, c) => {
+  base(g, t);
+  const iw = 200 * S, ih = 190 * S, ix = Z.cx - iw / 2, iy = c._iy ?? (Z.y0 + Z.h * 0.1);
+  if (c.icon === 'check') {   // 통과 배지 — 원이 차오르고 체크
+    const pr = E.outBack(seg(t, 0.02, 0.22));
+    g.fillStyle = R.card; g.beginPath(); g.arc(Z.cx, iy + ih / 2, ih / 2 * pr, 0, TAU); g.fill(); g.strokeStyle = R.ink; g.lineWidth = 5 * S; g.stroke();
+  } else {
+  g.fillStyle = R.card; g.beginPath(); g.roundRect(ix, iy, iw, ih, 16 * S); g.fill(); g.strokeStyle = R.ink; g.lineWidth = 5 * S; g.stroke();
+  const flip = Math.cos(Math.PI * E.inOutCubic(seg(t, 0.02, 0.3)));
+  g.save(); g.translate(ix + iw / 2, iy + 26 * S); g.scale(1, flip);
+  g.fillStyle = R.hi; g.fillRect(-iw / 2 + 5 * S, -22 * S, iw - 10 * S, 44 * S); g.restore();
+  g.fillStyle = R.ink; for (const dx of [-0.25, 0.25]) g.fillRect(ix + iw / 2 + dx * iw - 5 * S, iy - 16 * S, 10 * S, 34 * S);
+  }
+  const ck = E.outCubic(seg(t, 0.28, 0.48));
+  if (ck > 0) {
+    const pts = [[-0.3, 0.05], [-0.08, 0.28], [0.32, -0.18]].map(([a, b]) => [ix + iw / 2 + a * iw, iy + ih * 0.58 + b * ih]);
+    const l1 = Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]), l2 = Math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1]), L = ck * (l1 + l2);
+    g.strokeStyle = R.ink; g.lineWidth = 16 * S; g.lineCap = 'round'; g.lineJoin = 'round'; g.beginPath(); g.moveTo(...pts[0]);
+    if (L <= l1) g.lineTo(lerp(pts[0][0], pts[1][0], L / l1), lerp(pts[0][1], pts[1][1], L / l1)); else { g.lineTo(...pts[1]); g.lineTo(lerp(pts[1][0], pts[2][0], (L - l1) / l2), lerp(pts[1][1], pts[2][1], (L - l1) / l2)); }
+    g.stroke();
+  }
+  const apx = fit(c.a, 'sans', 900, Z.w * 0.8, Z.h * 0.2), ak = ink(g, c.a, apx, 'sans', 900);
+  const bpx = c.b ? fit(c.b, 'sans', 800, Z.w * 0.8, Z.h * 0.12) : 0, bk = c.b ? ink(g, c.b, bpx, 'sans', 800) : null;
+  let y = iy + ih + 70 * S;
+  [[c.a, apx, ak, 900, R.ink, 0.06], ...(c.b ? [[c.b, bpx, bk, 800, R.sub, 0.14]] : [])].forEach(([str, px, k, w, col, d0]) => {
+    const p = E.outExpo(seg(t, d0, d0 + 0.18));
+    g.save(); clipRect(g, 0, y - 8 * S, W, y + k.h + 8 * S);
+    text(g, str, Z.cx, y + k.h / 2 + (1 - p) * k.h * 1.3, px, { align: 'c', w, color: col });
+    g.restore(); CLIP = null; y += k.h + 34 * S;
+  });
+};
+
+// 10) 판정 — a 가 깔리고 b 가 올라온 뒤 hi 가 박힌다 (반전)
+TYPES.verdict = (g, t, d, c) => {
+  base(g, t);
+  const apx = Math.min(fit(c.a, 'sans', 800, Z.w * 0.97), 76 * S), ak = ink(g, c.a, apx, 'sans', 800);
+  const bpx = fit(c.b, 'sans', 900, Z.w * 0.97, Z.h * 0.14), bk = ink(g, c.b, bpx, 'sans', 900);
+  const hpx = fit(c.hi, 'sans', 900, Z.w * (R.chip ? 0.7 : 0.8), Z.h * 0.3), hk = ink(g, c.hi, hpx, 'sans', 900);
+  const gap = 44 * S, chipPad = R.chip ? hpx * 0.12 : 0;
+  const tot = ak.h + gap + bk.h + gap + hk.h + 2 * chipPad;
+  let y = Z.cy - tot / 2;
+  const pa = E.outExpo(seg(t, 0, 0.16));
+  g.save(); clipRect(g, 0, y - 8 * S, W, y + ak.h + 8 * S); text(g, c.a, c._center ? Z.cx : Z.x0, y + ak.h / 2 + (1 - pa) * ak.h * 1.3, apx, { w: 800, color: R.sub, ...(c._center ? { align: 'c' } : {}) }); g.restore(); CLIP = null;
+  y += ak.h + gap;
+  const bA = c.bSec ?? 0.2, hA = c.hiSec ?? 0.42;
+  const pb = E.outExpo(seg(t, bA, bA + 0.18));
+  g.save(); clipRect(g, 0, y - 8 * S, W, y + bk.h + 8 * S); text(g, c.b, c._center ? Z.cx : Z.x0, y + bk.h / 2 + (1 - pb) * bk.h * 1.3, bpx, { w: 900, color: R.ink, ...(c._center ? { align: 'c' } : {}) }); g.restore(); CLIP = null;
+  y += bk.h + gap + chipPad;
+  const ph = seg(t, hA, hA + 0.14);
+  if (ph > 0) {
+    const sc = lerp(1.2, 1, E.outExpo(ph)), sh = (1 - seg(t, hA + 0.14, hA + 0.30)) * 12 * S;
+    const hx = Z.cx, hy = y + hk.h / 2;
+    for (let k = 0; k < 10; k++) { const a = k / 10 * TAU + 0.3, r0 = hk.w * 0.62, r1 = r0 + 50 * S * E.outExpo(ph); g.strokeStyle = rgba(R.alarm, 1 - ph * 0.6); g.lineWidth = 6 * S; g.beginPath(); g.moveTo(hx + Math.cos(a) * r0, hy + Math.sin(a) * r0 * 0.6); g.lineTo(hx + Math.cos(a) * r1, hy + Math.sin(a) * r1 * 0.6); g.stroke(); }
+    g.save(); g.translate(hx + Math.sin(t * 160) * sh, hy); g.scale(sc, sc);
+    text(g, c.hi, 0, 0, hpx, hiWord({ align: 'c', w: 900 })); g.restore();
+  }
+};
+
+// 11) 한계 카드 — head 상자 + items (칸에 맞춰 낱말 단위로 줄바꿈)
+function wrapWords(g, str, px, fam, w, maxW) {
+  const words = str.split(' '); const lines = []; let cur = '';
+  for (const wd of words) { const cand = cur ? cur + ' ' + wd : wd; if (!cur || ink(g, cand, px, fam, w).w <= maxW) cur = cand; else { lines.push(cur); cur = wd; } }
+  if (cur) lines.push(cur); return lines;
+}
+TYPES.limits = (g, t, d, c) => {
+  base(g, t);
+  const hpx = Math.min(96 * S, Z.w * 0.14), hk = ink(g, c.head, hpx, 'sans', 900);
+  const ipx = Math.min(60 * S, Z.w * 0.088), bw = 44 * S, maxW = Z.w - bw;
+  let y = Z.y0 + Z.h * 0.12;
+  const ha = E.outExpo(seg(t, 0, 0.15));
+  g.save(); g.globalAlpha = ha;
+  const bp = 22 * S; g.strokeStyle = R.ink; g.lineWidth = 5 * S; g.strokeRect(Z.x0 + 3 * S, y, hk.w + bp * 2, hk.h + bp * 2);
+  text(g, c.head, Z.x0 + 3 * S + bp, y + bp + hk.h / 2, hpx, { w: 900, color: R.ink });
+  g.restore();
+  y += hk.h + bp * 2 + 70 * S;
+  c.items.forEach((it, i) => {
+    const lines = wrapWords(g, it, ipx, 'sans', 800, maxW), lh = ipx * 1.35;
+    const p = E.outExpo(seg(t, 0.12 + i * (c.stagger ?? 0.3), 0.3 + i * (c.stagger ?? 0.3)));
+    g.save(); clipRect(g, Z.x0, Z.y0, Z.x1, Z.y1); g.globalAlpha = p; g.translate((1 - p) * -60 * S, 0);
+    g.fillStyle = R.hi; g.fillRect(Z.x0 + 3 * S, y + lh / 2 - 12 * S, 24 * S, 24 * S);
+    lines.forEach((ln, j) => text(g, ln, Z.x0 + bw, y + lh / 2 + j * lh, ipx, { w: 800, color: R.ink }));
+    g.restore(); CLIP = null;
+    y += lines.length * lh + 50 * S;
+  });
+};
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// layout: "center" (2026-09-29 신설 · 10/12 기본값)
+//   ① 장면마다 **글자 블록 전체의 중심 = 글자 구역(글자안전()) 중심** (CX = Z.cx, CY = Z.cy). 글자는 가운데 정렬.
+//   ② **떠 있는 장식**(그리드·글로우·크롭 마크·충격파 링·파형·집합 원)은 **프레임 중심 FX = W/2** 대칭.
+//      글자 구역이 오른쪽 버튼 열 때문에 좌우 비대칭이라, 장식까지 CX 에 두면 눈의 무게중심이 왼쪽으로 쏠린다.
+//   ③ **글자에 붙은 장식**(칩·게이지·카운터 막대·줄긋기·아이콘·명령 카드·타임라인 연결선·판정 버스트)은 그 글자를 따른다.
+//      붙은 장식을 FX 로 보내면 글자와 122px 어긋난다.
+//   layout "left"(V-D · V-E)의 코드는 위 TYPES 에 그대로 있고 한 줄도 안 바뀐다.
+// ═════════════════════════════════════════════════════════════════════════════
+const TYPES_C = {};
+const FXc = () => W / 2;
+// 쌓은 줄들의 전체 높이 → 구역 세로 중심에 맞춘 맨 위 y
+const topFor = (total) => Z.cy - total / 2;
+
+TYPES_C.numberPunch = (g, t, d, c) => {
+  const sA = c.switchSec != null ? c.switchSec / d : (c.switchAt ?? 0.40), sL = c.switchLenSec != null ? c.switchLenSec / d : (c.switchLen ?? 0.14);
+  const one = !c.b;   // 값 하나짜리 컷 (쪼갠 장면) — 전환 없음
+  const sw = one ? 0 : E.inOutExpo(seg(t, d * sA, d * (sA + sL)));
+  const aBad = c.a.tone === 'bad';
+  base(g, t, sw > 0.5 ? P.danger : P.accent);
+  const K = !!R.chip, vf = K ? 0.78 : 0.82, vhf = K ? 0.26 : 0.28;
+  const vpx = Math.min(fit(c.a.value, 'sans', 900, Z.w * vf, Z.h * vhf), one ? Infinity : fit(c.b.value, 'sans', 900, Z.w * vf, Z.h * vhf));
+  const vh = ink(g, c.a.value, vpx, 'sans', 900).h, lpx = Math.min(72 * S, Z.w * 0.12 * FS);
+  const cp = c.caption ? Math.min(fit(c.caption, 'mono', 700, Z.w * 0.97), 40 * S) : 0, capH = c.caption ? cp * 1.2 + 60 * S : 0;
+  const np = Math.min(46 * S, Z.w * 0.068 * FS), notesH = c.notes ? 56 * S + c.notes.length * np * 1.5 : 0;
+  const above = vh * 0.5 + lpx * (K ? 1.9 : 1.8), below = vh * (K ? 0.66 : 0.62) + 52 * S;
+  const y0 = topFor(capH + above + below + notesH);
+  const cy = y0 + capH + above, ly = cy - vh * 0.5 - lpx * (K ? 1.4 : 1.3);
+  const win = { x0: Z.x0, y0: ly - lpx, x1: Z.x1, y1: cy + vh * (K ? 0.66 : 0.62) };
+  const p1 = seg(t, 0.02, d * 0.5); ring(g, FXc(), cy, vh * 0.5 + E.outExpo(p1) * Z.w * 0.6, R.hi, (1 - p1) * 0.7, 6 * S);
+  if (!one) { const p2 = seg(t, d * 0.5, d); ring(g, FXc(), cy, vh * 0.4 + E.outExpo(p2) * Z.w * 0.6, R.alarm, (1 - p2) * 0.7, 6 * S); }
+  g.save(); clipRect(g, win.x0, win.y0, win.x1, win.y1);
+  const roll = vh * (K ? 1.6 : 1.5);
+  if (sw < 1) {
+    const sc = lerp(0.62, 1, E.outBack(seg(t, 0, 0.16)));
+    g.save(); g.globalAlpha = 1 - sw;
+    text(g, c.a.label, Z.cx, ly - sw * roll, lpx, { align: 'c', w: 800, color: R.sub });
+    g.translate(Z.cx, cy - sw * roll); g.scale(sc, sc); text(g, c.a.value, 0, 0, vpx, aBad ? bad({ align: 'c', w: 900 }) : { align: 'c', w: 900, color: R.hi });
+    g.restore();
+  }
+  if (sw > 0) {
+    const shake = (1 - seg(t, d * (sA + sL), d * (sA + sL + 0.16))) * 10 * S;
+    g.save(); g.globalAlpha = sw;
+    text(g, c.b.label, Z.cx, ly + (1 - sw) * roll, lpx, { align: 'c', w: 800, color: R.sub });
+    g.translate(Z.cx + Math.sin(t * 150) * shake, cy + (1 - sw) * roll); text(g, c.b.value, 0, 0, vpx, bad({ align: 'c', w: 900 }));
+    g.restore();
+  }
+  g.restore(); CLIP = null;
+  const gy = win.y1 + 40 * S, gw = Z.w * 0.7, gx = Z.cx - gw / 2;
+  g.fillStyle = R.gauge; g.fillRect(gx, gy, gw, 12 * S);
+  g.fillStyle = R.hi; g.fillRect(gx, gy, gw * (one ? (aBad ? 0 : 1) : 1 - sw) * E.outCubic(seg(t, 0.04, 0.3)), 12 * S);
+  if (c.caption) text(g, c.caption, Z.cx, y0 + cp * 0.6, cp, { align: 'c', fam: 'mono', w: 700, color: R.sub });
+  if (c.notes) c.notes.forEach((n, i) => text(g, n, Z.cx, gy + 12 * S + 56 * S + np * 0.75 + i * np * 1.5, np, { align: 'c', w: 800, color: R.sub }));
+};
+
+TYPES_C.contrastCounter = (g, t, d, c) => {
+  base(g, t);
+  const rows = c.rows, maxV = Math.max(...rows.map(r => r.value), 1);
+  const lpx = Math.min(60 * S, Z.w * 0.09 * FS), npx = Math.min(fit('00', 'sans', 900, Z.w * 0.42), Z.h * 0.2 * FS), nk = ink(g, '00', npx, 'sans', 900);
+  const K = !!R.chip, g1 = (K ? 34 : 24) * S, g2 = (K ? 38 : 28) * S, barH = 20 * S, blockH = lpx * 1.1 + g1 + nk.h + g2 + barH, gap = 90 * S;
+  const fpx = Math.min(44 * S, Z.w * 0.065 * FS), tpx = c.title ? Math.min(64 * S, Z.w * 0.095 * FS) : 0, tH = c.title ? tpx * 1.2 + 56 * S : 0;
+  const total = tH + rows.length * blockH + (rows.length - 1) * gap + (c.foot ? fpx * 2.6 : 0);
+  let y = topFor(total);
+  if (c.title) { const ta = E.outExpo(seg(t, 0, 0.15)); g.save(); g.globalAlpha = ta; text(g, c.title, Z.cx, y + tpx * 0.6, tpx, { align: 'c', w: 900, color: R.ink }); g.restore();
+    const uw = Z.w * E.outCubic(seg(t, 0.05, 0.3)); g.fillStyle = R.hi; g.fillRect(Z.cx - uw / 2, y + tpx * 1.2 + 14 * S, uw, 5 * S); y += tH; }
+  const cS = c.countSec || [0.06, d * 0.6], prog = E.outCubic(seg(t, cS[0], cS[1]));
+  const pS = c.popSec != null ? [c.popSec, c.popSec + d * 0.14] : [d * 0.58, d * 0.72];
+  rows.forEach((r, i) => {
+    const a = E.outExpo(seg(t, i * 0.05, 0.2 + i * 0.05)), dy = (1 - a) * 40 * S, good = r.tone !== 'bad';
+    g.save(); clipRect(g, Z.x0, Z.y0, Z.x1, Z.y1); g.globalAlpha = a; g.translate(0, dy);
+    text(g, r.label, Z.cx, y + lpx * 0.55, lpx, { align: 'c', w: 800, color: R.sub });
+    const v = Math.round(r.value * prog), ny = y + lpx * 1.1 + g1 + nk.h / 2;
+    const pop = !good ? 1 + 0.08 * Math.sin(Math.PI * seg(t, pS[0], pS[1])) : 1;
+    g.save(); g.translate(Z.cx, ny); g.scale(pop, pop); text(g, String(v), 0, 0, npx, good ? { align: 'c', w: 900, color: R.ink } : bad({ align: 'c', w: 900 })); g.restore();
+    const by = ny + nk.h / 2 + g2;
+    g.fillStyle = R.track; g.fillRect(Z.x0, by, Z.w, barH); g.strokeStyle = R.trackLine; g.lineWidth = 2 * S; g.strokeRect(Z.x0, by, Z.w, barH);
+    const bw = Z.w * (r.value / maxV) * prog;
+    if (bw > 0) { g.fillStyle = good ? R.hi : R.alarm; g.fillRect(Z.x0, by, bw, barH); }
+    else if (Math.floor(t * FPS / 3) % 2) { g.fillStyle = R.alarm; g.fillRect(Z.x0, by - 6 * S, 6 * S, barH + 12 * S); }
+    g.fillStyle = R.tick; for (let k = 1; k < maxV; k++) g.fillRect(Z.x0 + Z.w * k / maxV, by + barH + 6 * S, 2 * S, 8 * S);
+    g.restore(); CLIP = null;
+    y += blockH + gap;
+  });
+  const fa = E.outExpo(seg(t, d * 0.5, d * 0.7));
+  if (fa > 0 && c.foot) { g.save(); g.globalAlpha = fa; text(g, c.foot, Z.cx, y - gap + fpx * 1.6 + (1 - fa) * 20 * S, fpx, { align: 'c', fam: 'mono', w: 700, color: R.sub }); g.restore(); }
+};
+
+TYPES_C.glitchEquation = (g, t, d, c) => {
+  const cpx = Math.min(48 * S, Z.w * 0.075 * FS);
+  const epx = fit(c.eq, 'sans', 900, Z.w * 0.92, Z.h * 0.16), ek = ink(g, c.eq, epx, 'sans', 900);
+  const rpx = fit(c.reveal, 'sans', 900, Z.w * (R.chip ? 0.72 : 0.8), Z.h * 0.2), rk = ink(g, c.reveal, rpx, 'sans', 900);
+  const npx = c.note ? Math.min(fit(c.note, 'sans', 800, Z.w * 0.97), 58 * S) : 0, mh = Math.max(ek.h, rk.h);
+  const capOff = mh / 2 + cpx * (R.chip ? 2.4 : 2.2), noteOff = mh / 2 + 150 * S;
+  const top = capOff + cpx * 0.6, bot = c.note ? noteOff + npx * 0.6 : mh / 2 + (R.chip ? rpx * 0.12 : 0);
+  const cy = Z.cy + (top - bot) / 2;                    // 캡션 위 끝 ~ note 아래 끝 가운데가 구역 중심
+  const cc = { ...c, _cy: cy };
+  TYPES.glitchEquation(g, t, d, cc);                    // 효과는 그대로 쓰고 자리만 받는다 (_cy · CENTER 분기)
+};
+
+TYPES_C.setSplit = (g, t, d, c) => {
+  base(g, t, P.info);
+  const cpx = Math.min(44 * S, Z.w * 0.064), spx = Math.min(52 * S, Z.w * 0.076);
+  const epx = fit(c.eq, 'sans', 900, Z.w * 0.78, Z.h * 0.13), ek = ink(g, c.eq, epx, 'sans', 900);
+  const Rr = Math.min(Z.w * 0.32, Z.h * 0.2);
+  const blockH = cpx * 1.2 + 16 * S + spx * 1.2 + 40 * S + ek.h + 70 * S + Rr * 2;
+  let y = topFor(blockH);
+  const ta = E.outExpo(seg(t, 0, 0.18));
+  g.save(); g.globalAlpha = ta;
+  text(g, c.caption, Z.cx, y + cpx * 0.6, cpx, { align: 'c', fam: 'mono', w: 700, color: R.sub }); y += cpx * 1.2 + 16 * S;
+  text(g, c.sub, Z.cx, y + spx * 0.6, spx, { align: 'c', w: 800, color: R.sub }); y += spx * 1.2 + 40 * S;
+  g.restore();
+  const ep = E.outBack(seg(t, 0.06, 0.26));
+  g.save(); g.translate(Z.cx, y + ek.h / 2); g.scale(lerp(0.7, 1, ep), lerp(0.7, 1, ep)); g.globalAlpha = clamp(ep * 1.5);
+  text(g, c.eq, 0, 0, epx, { align: 'c', w: 900, color: R.ink }); g.restore();
+  y += ek.h + 70 * S;
+  setDots(g, t, d, c, FXc(), y + Rr, Rr);                // 떠 있는 장식 — 프레임 중심
+};
+
+TYPES_C.command = (g, t, d, c) => {
+  base(g, t);
+  const rpx = fit(c.result, 'sans', 900, Z.w * 0.5, Z.h * 0.36), rk = ink(g, c.result, rpx, 'sans', 900);
+  const cw = Z.w, ch = 150 * S, cx0 = Z.x0, cy0 = topFor(ch + 110 * S + rk.h);
+  g.fillStyle = R.card; g.beginPath(); g.roundRect(cx0, cy0, cw, ch, 18 * S); g.fill(); g.strokeStyle = R.trackLine; g.lineWidth = 2 * S; g.stroke();
+  const chev = 44 * S, pad = 30 * S;
+  g.strokeStyle = R.hi; g.lineWidth = 7 * S; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); g.moveTo(cx0 + pad, cy0 + ch / 2 - 16 * S); g.lineTo(cx0 + pad + 18 * S, cy0 + ch / 2); g.lineTo(cx0 + pad, cy0 + ch / 2 + 16 * S); g.stroke();
+  const tx = cx0 + pad + chev, px = Math.min(fit(c.cmd, 'mono', 700, cw - pad * 2 - chev - 30 * S), 46 * S);
+  const nch = Math.floor(seg(t, 0.03, c.typeEnd ?? 0.3) * c.cmd.length + 1e-6), shown = [...c.cmd].slice(0, nch).join('');
+  let cursorX = tx;   // 타이핑은 글자가 오른쪽으로 자라야 해서 카드 안에서는 왼쪽 정렬이다 (카드는 구역 가운데)
+  if (shown.length) { const k = text(g, shown, tx, cy0 + ch / 2, px, { fam: 'mono', w: 700, color: R.ink }); cursorX = tx + k.w + 8 * S; }
+  if (Math.floor(t * FPS / 4) % 2 === 0 || nch < c.cmd.length) { g.fillStyle = R.hi; g.fillRect(cursorX, cy0 + ch / 2 - px * 0.55, px * 0.55, px * 1.1); }
+  const ra = seg(t, (c.typeEnd ?? 0.3) + 0.06, (c.typeEnd ?? 0.3) + 0.26);
+  if (ra > 0) {
+    const ry = cy0 + ch + 110 * S + rk.h / 2;
+    g.strokeStyle = R.sub; g.lineWidth = 4 * S; g.beginPath(); g.moveTo(Z.cx, cy0 + ch + 20 * S); g.lineTo(Z.cx, cy0 + ch + 20 * S + 60 * S * ra); g.stroke();
+    ring(g, FXc(), ry, rpx * 0.4 + E.outExpo(ra) * Z.w * 0.4, R.hi, (1 - ra) * 0.8, 6 * S);
+    const sc = lerp(0.5, 1, E.outBack(ra));
+    g.save(); g.translate(Z.cx, ry); g.scale(sc, sc); text(g, c.result, 0, 0, rpx, { align: 'c', w: 900, color: R.ink }); g.restore();
+  }
+};
+
+TYPES_C.timeline = (g, t, d, c) => {
+  base(g, t);
+  const lpx = Math.min(52 * S, Z.w * 0.078), dpx = Math.min(fit(c.from.date, 'mono', 700, Z.w * 0.42), 110 * S);
+  const lk = ink(g, c.from.label, lpx, 'sans', 800), dk = ink(g, c.from.date, dpx, 'mono', 700), arrow = 150 * S, gp = 40 * S;
+  const blk = lpx * 1.2 + dk.h;   // 라벨 + 날짜 한 묶음
+  let y = topFor(blk * 2 + gp * 2 + arrow);
+  const fa = E.outExpo(seg(t, 0.02, 0.2));
+  if (fa > 0) { g.save(); g.globalAlpha = fa; text(g, c.from.label, Z.cx, y + lpx * 0.5, lpx, { align: 'c', w: 800, color: R.sub }); text(g, c.from.date, Z.cx, y + lpx * 1.2 + dk.h / 2, dpx, { align: 'c', fam: 'mono', w: 700, color: R.ink }); g.restore(); }
+  y += blk + gp;
+  const dr = E.inOutCubic(seg(t, 0.05, 0.5));   // 두 날짜를 잇는 선 하나 (세로) — 표시는 기본 끔
+  g.strokeStyle = R.trackLine; g.lineWidth = 6 * S; g.lineCap = 'round'; g.beginPath(); g.moveTo(Z.cx, y); g.lineTo(Z.cx, y + arrow * dr); g.stroke();
+  if (dr > 0.98 && !(c.marks > 0)) { const ah = 22 * S; g.fillStyle = R.trackLine; g.beginPath(); g.moveTo(Z.cx, y + arrow + 6 * S); g.lineTo(Z.cx - ah * 0.7, y + arrow - ah); g.lineTo(Z.cx + ah * 0.7, y + arrow - ah); g.closePath(); g.fill(); }
+  const MK = c.marks > 0 ? c.marks : 0;
+  for (let k = 0; k < MK; k++) { const u = MK === 1 ? 0 : k / (MK - 1), p = E.outBack(seg(dr, u - 0.02, u + 0.12)); if (p > 0) { g.fillStyle = R.hi; g.beginPath(); g.arc(Z.cx, y + arrow * u, 10 * S * p, 0, TAU); g.fill(); } }
+  y += arrow + gp;
+  const ta = E.outExpo(seg(t, 0.42, 0.6));
+  if (ta > 0) { g.save(); g.globalAlpha = ta; text(g, c.to.label, Z.cx, y + lpx * 0.5, lpx, { align: 'c', w: 800, color: R.sub }); text(g, c.to.date, Z.cx, y + lpx * 1.2 + dk.h / 2, dpx, { align: 'c', fam: 'mono', w: 700, color: R.ink }); g.restore(); }
+};
+
+TYPES_C.stamp = (g, t, d, c) => {
+  const apx = fit(c.a, 'sans', 900, Z.w * 0.8, Z.h * 0.2), ak = ink(g, c.a, apx, 'sans', 900);
+  const bpx = c.b ? fit(c.b, 'sans', 800, Z.w * 0.8, Z.h * 0.12) : 0, bk = c.b ? ink(g, c.b, bpx, 'sans', 800) : null;
+  const ih = 190 * S, textH = ak.h + (c.b ? 34 * S + bk.h : 0);
+  TYPES.stamp(g, t, d, { ...c, _iy: Z.cy - textH / 2 - 70 * S - ih });   // 글자 블록 중심 = 구역 중심 · 아이콘은 위 장식   // 아이콘·체크·글자 순서는 같고 맨 위 y 만 받는다
+};
+
+TYPES_C.verdict = (g, t, d, c) => TYPES.verdict(g, t, d, { ...c, _center: true });
+TYPES_C.kinetic = (g, t, d, c) => TYPES.kinetic(g, t, d, c);   // 글자는 원래 가운데 · 파형만 CENTER 분기로 FX 대칭
+TYPES_C.strike = (g, t, d, c) => TYPES.strike(g, t, d, c);     // 원래 가운데 정렬
+
+TYPES_C.limits = (g, t, d, c) => {
+  base(g, t);
+  const hpx = Math.min(96 * S, Z.w * 0.14 * FS), hk = ink(g, c.head, hpx, 'sans', 900), bp = 22 * S;
+  const ipx = Math.min(60 * S, Z.w * 0.088 * FS), bw = 44 * S, lh = ipx * 1.35;
+  const wrapped = c.items.map(it => wrapWords(g, it, ipx, 'sans', 800, Z.w - bw * 2));
+  const itemsH = wrapped.reduce((a, ls) => a + ls.length * lh + 50 * S, 0) - 50 * S;
+  let y = topFor(hk.h + bp * 2 + 70 * S + itemsH);
+  const ha = E.outExpo(seg(t, 0, 0.15));
+  g.save(); g.globalAlpha = ha; g.strokeStyle = R.ink; g.lineWidth = 5 * S; g.strokeRect(Z.cx - hk.w / 2 - bp, y, hk.w + bp * 2, hk.h + bp * 2);
+  text(g, c.head, Z.cx, y + bp + hk.h / 2, hpx, { align: 'c', w: 900, color: R.ink }); g.restore();
+  y += hk.h + bp * 2 + 70 * S;
+  wrapped.forEach((lines, i) => {
+    const p = E.outExpo(seg(t, 0.12 + i * (c.stagger ?? 0.3), 0.3 + i * (c.stagger ?? 0.3)));
+    g.save(); clipRect(g, Z.x0, Z.y0, Z.x1, Z.y1); g.globalAlpha = p; g.translate(0, (1 - p) * 30 * S);
+    lines.forEach((ln, j) => { const k = text(g, ln, Z.cx, y + lh / 2 + j * lh, ipx, { align: 'c', w: 800, color: R.ink }); if (j === 0) { g.fillStyle = R.hi; g.fillRect(Z.cx - k.w / 2 - 38 * S, y + lh / 2 - 11 * S, 22 * S, 22 * S); } });
+    g.restore(); CLIP = null;
+    y += lines.length * lh + 50 * S;
+  });
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 사전 10종 (2026-09-30 · 모션그래픽 주문 사전 dx.json 의 장면 명세를 우리 계약으로 옮김 — 시험판)
+//   원 명세는 가로 16:9 · 우리는 세로 9:16 이라 **가로로 늘어선 것은 세로로 쌓았다**(흐름도·전후 비교).
+//   ⛔ 원 명세의 라벨 글자(「오늘의 용어」·「OX 퀴즈」·「BEFORE」·「Q」·입력창 안내문)는 **그리지 않는다** — 화면 글자는 장면 JSON 필드에서만.
+//      그 자리는 모양(색 띠·원·빈 알약)으로 둔다. 카운트다운 숫자도 없다(고리만).
+//   박자: 각 타입의 BASE 초 기준 비트 — 장면이 BASE 보다 **짧으면 비율로 줄이고, 길면 등장은 그대로 두고 끝의 머무는 구간만 늘어난다**(kb).
+//   볼거리(wow)는 장면마다 한 번.
+// ═════════════════════════════════════════════════════════════════════════════
+const kb = (d, base) => Math.min(1, d / base);            // 비트 배율: 짧을 때만 줄인다
+const solidCard = () => R.chip || P.panel;               // 속이 찬 카드: dark = panel · accent = bg 칩
+const onSolid = () => ({ ink: P.text, sub: P.dim, hi: P.accent });   // 속이 찬 카드 위 글자 (두 바탕 공통)
+const hiFill = () => R.chip ? { fill: P.bg, fg: P.accent } : { fill: P.accent, fg: P.onAccent };   // 강조 면
+function wrapPx(g, str, fam, w, maxW, maxPx, maxLines) {   // 줄 수 한도 안에서 가장 큰 글자
+  let px = maxPx, lines = wrapWords(g, str, px, fam, w, maxW);
+  while ((lines.length > maxLines || lines.some((l) => ink(g, l, px, fam, w).w > maxW)) && px > 20 * S) { px *= 0.94; lines = wrapWords(g, str, px, fam, w, maxW); }
+  return { px, lines };
+}
+function roundBox(g, x, y, w, h, r, fill, stroke, lw) { g.beginPath(); g.roundRect(x, y, w, h, r); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.lineWidth = lw || 3 * S; g.stroke(); } }
+const BASE_DICT = { termCard: 4.4, flowDiagram: 4.5, quizOX: 5.2, chatUI: 6.6, spotlight: 4.5, innerThought: 3.8, speedLines: 1.8, beforeAfter: 3.4, progressBar: 3.6, faqFlip: 7.0 };
+
+// T17 용어 팝업 카드 — 카드 톡 → 뜻 타자 → 형광펜 → 머묾 (wow: 형광펜 끝에서 뜻이 한 번 커졌다 돌아옴)
+TYPES.termCard = (g, t, d, c) => {
+  base(g, t); const k = kb(d, BASE_DICT.termCard), T = (x) => x * k, O = onSolid();
+  const cw = Z.w * 0.9, pad = 44 * S;
+  const tpx = fit(c.term, 'sans', 900, cw - pad * 2, Z.h * 0.14), tk = ink(g, c.term, tpx, 'sans', 900);
+  const fpx = c.full ? Math.min(fit(c.full, 'sans', 700, cw - pad * 2), 40 * S) : 0;
+  const m = wrapPx(g, c.mean, 'sans', 800, cw - pad * 2, Math.min(64 * S, tpx * 0.6), 2), mlh = m.px * 1.35;
+  const ch = pad + 16 * S + tk.h + (c.full ? 24 * S + fpx : 0) + 44 * S + m.lines.length * mlh + pad;
+  const y0 = topFor(ch), x0 = Z.cx - cw / 2;
+  const pop = E.outBack(seg(t, T(0.2), T(0.6))); if (pop <= 0) return;
+  g.save(); g.translate(Z.cx, y0 + ch / 2); g.rotate(lerp(-0.1, 0, pop)); g.scale(lerp(0.6, 1, pop), lerp(0.6, 1, pop)); g.globalAlpha = clamp(pop * 1.4); g.translate(-Z.cx, -(y0 + ch / 2));
+  roundBox(g, x0, y0, cw, ch, 28 * S, solidCard());
+  g.fillStyle = O.hi; g.fillRect(x0 + pad, y0 + 16 * S, 90 * S, 8 * S);   // 머리 띠 (원 명세의 「오늘의 용어」 자리 — 글자 대신 모양)
+  let y = y0 + pad + 16 * S;
+  text(g, c.term, Z.cx, y + tk.h / 2, tpx, { align: 'c', w: 900, color: O.ink, on: solidCard() }); y += tk.h;
+  if (c.full) { y += 24 * S; text(g, c.full, Z.cx, y + fpx / 2, fpx, { align: 'c', w: 700, color: O.sub, on: solidCard() }); y += fpx; }
+  y += 44 * S;
+  const total = m.lines.reduce((a, l) => a + [...l].length, 0), nch = Math.floor(seg(t, T(0.9), T(1.9)) * total + 1e-6);
+  const hl = E.inOutCubic(seg(t, T(2.1), T(2.6))), wow = 1 + 0.06 * Math.sin(Math.PI * seg(t, T(2.6), T(2.9)));
+  let left = nch;
+  m.lines.forEach((ln, j) => {
+    const cy = y + mlh / 2 + j * mlh, cs = [...ln], shown = cs.slice(0, Math.max(0, left)).join(''); left -= cs.length;
+    const lk = ink(g, ln, m.px, 'sans', 800);
+    if (hl > 0) { g.fillStyle = rgba(P.accent, 0.42); g.fillRect(Z.cx - lk.w / 2 - 6 * S, cy + lk.h * 0.12, (lk.w + 12 * S) * hl, lk.h * 0.42); }
+    if (!shown) return;
+    g.save(); g.translate(Z.cx, cy); g.scale(wow, wow);
+    text(g, shown, -lk.w / 2, 0, m.px, { w: 800, color: O.ink, on: solidCard() });   // 왼쪽 끝 고정 — 타자 중에 줄이 좌우로 흔들리지 않게
+    g.restore();
+  });
+  g.restore();
+};
+
+// T10 개념 도해 — 상자 톡 → 화살표가 선을 그림 → 다음 상자 (세로로 쌓음) · wow: 마지막 상자만 크게 튕기며 빛
+TYPES.flowDiagram = (g, t, d, c) => {
+  base(g, t); const k = kb(d, BASE_DICT.flowDiagram), T = (x) => x * k, O = onSolid(), H2 = hiFill();
+  const n = c.steps.length, bw = Z.w * 0.82, gapA = 96 * S, pad = 30 * S;
+  const fitted = c.steps.map((s) => wrapPx(g, s, 'sans', 900, bw - pad * 2, 70 * S, 2));
+  const px = Math.min(...fitted.map((f) => f.px)), rows = c.steps.map((s) => wrapWords(g, s, px, 'sans', 900, bw - pad * 2));
+  const bh = rows.map((ls) => ls.length * px * 1.3 + pad * 2), total = bh.reduce((a, b) => a + b, 0) + gapA * (n - 1);
+  let y = topFor(total); const step = 0.9;
+  rows.forEach((ls, i) => {
+    const p0 = T(0.2 + i * step), p = E.outBack(seg(t, p0, p0 + T(0.4))), last = i === n - 1;
+    const wow = last ? 1 + 0.08 * Math.sin(Math.PI * seg(t, p0 + T(0.4), p0 + T(0.75))) : 1;
+    if (p > 0) {
+      const fill = last ? H2.fill : solidCard(), fg = last ? H2.fg : O.ink;
+      g.save(); g.translate(Z.cx, y + bh[i] / 2); g.scale(lerp(0.5, 1, p) * wow, lerp(0.5, 1, p) * wow); g.globalAlpha = clamp(p * 1.5);
+      if (last && wow > 1.001) { g.shadowColor = rgba(P.accent, 0.9); g.shadowBlur = 60 * S * (wow - 1) / 0.08; }
+      roundBox(g, -bw / 2, -bh[i] / 2, bw, bh[i], 24 * S, fill); g.shadowBlur = 0;
+      ls.forEach((ln, j) => text(g, ln, 0, -bh[i] / 2 + pad + px * 0.65 + j * px * 1.3, px, { align: 'c', w: 900, color: fg, on: fill }));
+      g.restore();
+    }
+    y += bh[i];
+    if (!last) {   // 화살표: 상자 사이에만 (상자를 뚫지 않는다)
+      const a = E.inOutCubic(seg(t, T(0.6 + i * step), T(1.1 + i * step)));
+      if (a > 0) { const ax = Z.cx, ay0 = y + 14 * S, ay1 = y + gapA - 14 * S, ye = lerp(ay0, ay1, a);
+        g.strokeStyle = R.ink; g.lineWidth = 7 * S; g.lineCap = 'round'; g.beginPath(); g.moveTo(ax, ay0); g.lineTo(ax, ye); g.stroke();
+        if (a > 0.9) { const ah = 20 * S; g.fillStyle = R.ink; g.beginPath(); g.moveTo(ax, ay1 + 4 * S); g.lineTo(ax - ah, ay1 - ah); g.lineTo(ax + ah, ay1 - ah); g.closePath(); g.fill(); } }
+      y += gapA;
+    }
+  });
+};
+
+// T14 OX 퀴즈 — 문제 + 줄어드는 고리 → 0 에서 정답 도장 쾅 → 0.3s 뒤 해설 · ⛔ 도장 전에는 해설을 안 보인다 · wow: 도장 순간 화면이 한 번 쿵
+TYPES.quizOX = (g, t, d, c) => {
+  const k = kb(d, BASE_DICT.quizOX), T = (x) => x * k, sec = (c.countSec ?? 2.6);
+  const tStamp = T(0.5 + sec), shake = (1 - seg(t, tStamp, tStamp + T(0.25))) * (t >= tStamp ? 16 * S : 0);
+  g.save(); g.translate(Math.sin(t * 170) * shake, Math.cos(t * 130) * shake * 0.6);
+  base(g, t);
+  const q = wrapPx(g, c.q, 'sans', 900, Z.w * 0.92, 80 * S, 3), qlh = q.px * 1.3;
+  const rr = Math.min(Z.w * 0.26, 190 * S), e = wrapPx(g, c.exp, 'sans', 800, Z.w * 0.92, 56 * S, 2), elh = e.px * 1.35;
+  const total = q.lines.length * qlh + 70 * S + rr * 2 + 70 * S + e.lines.length * elh;
+  let y = topFor(total);
+  const qa = E.outExpo(seg(t, 0, T(0.35)));
+  g.save(); g.globalAlpha = qa; q.lines.forEach((ln, j) => text(g, ln, Z.cx, y + qlh / 2 + j * qlh + (1 - qa) * 30 * S, q.px, { align: 'c', w: 900, color: R.ink })); g.restore();
+  y += q.lines.length * qlh + 70 * S;
+  const cx = FXc(), cy = y + rr, left = 1 - seg(t, T(0.5), tStamp);
+  ring(g, cx, cy, rr, R.chip ? P.bg : P.line, 0.55, 22 * S);
+  if (left > 0) { g.strokeStyle = R.alarm; g.lineWidth = 22 * S; g.lineCap = 'round'; g.beginPath(); g.arc(cx, cy, rr, -Math.PI / 2, -Math.PI / 2 + TAU * left); g.stroke(); }
+  const sp = seg(t, tStamp, tStamp + T(0.2));
+  if (sp > 0) {   // 정답 기호는 모양으로 그린다 (글자 아님)
+    const sc = lerp(2, 1, E.outCubic(sp)), rot = lerp(-0.5, -0.12, E.outCubic(sp)), sz = rr * 0.72;
+    g.save(); g.translate(cx, cy); g.rotate(rot); g.scale(sc, sc); g.globalAlpha = clamp(sp * 2);
+    g.strokeStyle = R.alarm; g.lineWidth = 30 * S; g.lineCap = 'round'; g.beginPath();
+    if (c.ans === 'O') g.arc(0, 0, sz, 0, TAU); else { g.moveTo(-sz, -sz); g.lineTo(sz, sz); g.moveTo(sz, -sz); g.lineTo(-sz, sz); }
+    g.stroke(); g.restore();
+  }
+  y += rr * 2 + 70 * S;
+  const ea = E.outExpo(seg(t, tStamp + T(0.3), tStamp + T(0.6)));
+  if (ea > 0) { g.save(); g.globalAlpha = ea; e.lines.forEach((ln, j) => text(g, ln, Z.cx, y + elh / 2 + j * elh, e.px, { align: 'c', w: 800, color: R.ink })); g.restore(); }
+  g.restore();
+};
+
+// T11 AI 채팅 화면 — 질문 타자 → 점 세 개 → 답이 한 줄씩 · wow: 마지막 글자에서 답 말풍선이 한 번 톡 · ⛔ 실제 서비스 화면·로고 흉내 없음
+TYPES.chatUI = (g, t, d, c) => {
+  base(g, t); const k = kb(d, BASE_DICT.chatUI), T = (x) => x * k, O = onSolid(), H2 = hiFill();
+  const bwMax = Z.w * 0.8, pad = 30 * S;
+  const q = wrapPx(g, c.q, 'sans', 800, bwMax - pad * 2, 54 * S, 3), qlh = q.px * 1.35;
+  const apx = Math.min(...c.answers.map((a) => wrapPx(g, a, 'sans', 800, bwMax - pad * 2, 54 * S, 2).px));
+  const aLines = c.answers.flatMap((a) => wrapWords(g, a, apx, 'sans', 800, bwMax - pad * 2)), alh = apx * 1.4;
+  const qw = Math.max(...q.lines.map((l) => ink(g, l, q.px, 'sans', 800).w)) + pad * 2, qh = q.lines.length * qlh + pad * 2;
+  const aw = Math.max(...aLines.map((l) => ink(g, l, apx, 'sans', 800).w), 160 * S) + pad * 2, ah = aLines.length * alh + pad * 2;
+  const inH = 84 * S, total = qh + 50 * S + ah + 80 * S + inH;
+  let y = topFor(total); const xR = Z.cx + Z.w * 0.45, xL = Z.cx - Z.w * 0.45;
+  // 질문 (오른쪽 · 강조 면)
+  const qa = E.outBack(seg(t, T(0.15), T(0.35)));
+  if (qa > 0) {
+    g.save(); g.globalAlpha = clamp(qa * 1.5); roundBox(g, xR - qw, y, qw, qh, 30 * S, H2.fill);
+    const tot = q.lines.reduce((a, l) => a + [...l].length, 0); let left = Math.floor(seg(t, T(0.3), T(1.4)) * tot + 1e-6);
+    q.lines.forEach((ln, j) => { const cs = [...ln], sh = cs.slice(0, Math.max(0, left)).join(''); left -= cs.length; if (sh) text(g, sh, xR - qw + pad, y + pad + qlh / 2 + j * qlh, q.px, { w: 800, color: H2.fg, on: H2.fill }); });
+    g.restore();
+  }
+  y += qh + 50 * S;
+  // 답 (왼쪽 · 카드) — 점 세 개가 먼저
+  const dotsA = seg(t, T(1.6), T(1.8)) * (1 - seg(t, T(2.4), T(2.5))), bub = seg(t, T(2.4), T(2.6));
+  if (dotsA > 0) { roundBox(g, xL, y, 170 * S, 96 * S, 30 * S, solidCard()); for (let i = 0; i < 3; i++) { const on = Math.floor((t / T(0.18)) + i) % 3 === 0; g.fillStyle = rgba(O.sub, on ? 1 : 0.45); g.beginPath(); g.arc(xL + 50 * S + i * 36 * S, y + 48 * S, 11 * S, 0, TAU); g.fill(); } }
+  if (bub > 0) {
+    const tot = aLines.reduce((a, l) => a + [...l].length, 0), pr = seg(t, T(2.5), T(5.0));
+    const wow = 1 + 0.05 * Math.sin(Math.PI * seg(t, T(5.0), T(5.25)));
+    g.save(); g.translate(xL, y); g.scale(wow, wow); g.globalAlpha = clamp(bub * 2);
+    roundBox(g, 0, 0, aw, ah, 30 * S, solidCard());
+    let left = Math.floor(pr * tot + 1e-6);
+    aLines.forEach((ln, j) => { const cs = [...ln], sh = cs.slice(0, Math.max(0, left)).join(''); left -= cs.length; if (sh) text(g, sh, pad, pad + alh / 2 + j * alh, apx, { w: 800, color: O.ink, on: solidCard() }); });
+    g.restore();
+  }
+  y += ah + 80 * S;
+  // 입력창 — 빈 알약 (안내 글자 없음) + 보내기 원
+  roundBox(g, Z.cx - Z.w * 0.45, y, Z.w * 0.9, inH, inH / 2, null, R.chip ? P.bg : P.line, 4 * S);
+  g.fillStyle = R.hi; g.beginPath(); g.arc(Z.cx + Z.w * 0.45 - inH / 2, y + inH / 2, inH * 0.32, 0, TAU); g.fill();
+};
+
+// T19 화면 줌 + 스포트라이트 — 화면(줄 목록) → 누를 줄만 밝게 · 나머지 흐리게 → 그쪽으로 확대 → 말표 · wow: 확대가 멈출 때 테두리가 한 번 빛남
+TYPES.spotlight = (g, t, d, c) => {
+  base(g, t); const k = kb(d, BASE_DICT.spotlight), T = (x) => x * k, O = onSolid(), H2 = hiFill();
+  const cw = Z.w * 0.94, pad = 34 * S, rows = c.rows, ti = c.target ?? 0;
+  const rpx = Math.min(...rows.map((r) => Math.min(fit(r, 'mono', 700, cw - pad * 2), 48 * S))), rlh = rpx * 2.1;
+  const sh = rows.length * rlh + pad * 2, lpx = Math.min(fit(c.label, 'sans', 900, Z.w * 0.8), 60 * S), lh = lpx * 1.9;
+  const total = lh + 60 * S + sh; let y = topFor(total);
+  const sy = y + lh + 60 * S, x0 = Z.cx - cw / 2, tyc = sy + pad + rlh / 2 + ti * rlh;
+  const shade = E.inOutCubic(seg(t, T(0.6), T(1.2))), zm = E.inOutCubic(seg(t, T(1.3), T(2.3))), zs = lerp(1, 1.14, zm);
+  const sa = E.outExpo(seg(t, 0, T(0.3)));
+  g.save(); g.globalAlpha = sa; g.translate(Z.cx, tyc); g.scale(zs, zs); g.translate(-Z.cx, -tyc);
+  roundBox(g, x0, sy, cw, sh, 22 * S, solidCard());
+  g.fillStyle = rgba(P.dim, 0.9); for (let i = 0; i < 3; i++) { g.beginPath(); g.arc(x0 + 26 * S + i * 24 * S, sy + 20 * S, 6 * S, 0, TAU); g.fill(); }
+  rows.forEach((r, i) => {
+    const on = i === ti, ry = sy + pad + rlh / 2 + i * rlh;
+    if (on && shade > 0) { const glow = seg(t, T(2.3), T(2.5)) * (1 - seg(t, T(2.5), T(2.8))); roundBox(g, x0 + 12 * S, ry - rlh * 0.42, cw - 24 * S, rlh * 0.84, 14 * S, null, rgba(P.accent, lerp(0.5, 1, glow)), lerp(4, 9, glow) * S); }
+    g.save(); g.globalAlpha = sa * (on ? 1 : lerp(1, 0.3, shade)); text(g, r, x0 + pad, ry, rpx, { fam: 'mono', w: 700, color: on ? O.hi : O.ink, on: solidCard() }); g.restore();
+  });
+  g.restore();
+  const la = E.outBack(seg(t, T(2.4), T(2.7)));
+  if (la > 0) { const lw = ink(g, c.label, lpx, 'sans', 900).w + 56 * S, ly = y + (1 - la) * 30 * S;
+    g.save(); g.globalAlpha = clamp(la * 1.5); roundBox(g, Z.cx - lw / 2, ly, lw, lh, lh / 2, H2.fill);
+    g.fillStyle = H2.fill; g.beginPath(); g.moveTo(Z.cx - 18 * S, ly + lh - 1); g.lineTo(Z.cx + 18 * S, ly + lh - 1); g.lineTo(Z.cx, ly + lh + 26 * S); g.closePath(); g.fill();
+    text(g, c.label, Z.cx, ly + lh / 2, lpx, { align: 'c', w: 900, color: H2.fg, on: H2.fill }); g.restore(); }
+};
+
+// B02 속마음 자막 — 바탕 색이 반쯤 빠지고, 한 글자씩 흐릿하게 번지며 내려와 또렷해짐 → 물결로 머묾 · 괄호는 모양 · wow: 다 또렷해지는 순간 한 번 숨 쉬듯
+TYPES.innerThought = (g, t, d, c) => {
+  const k = kb(d, BASE_DICT.innerThought), T = (x) => x * k;
+  base(g, t);
+  const fade = E.inOutCubic(seg(t, T(0.2), T(0.8))) * 0.5; g.fillStyle = rgba(P.bg, fade * 0.6); g.fillRect(0, 0, W, H);   // 「색 절반 빼기」 — 흑백까지 안 간다
+  const m = wrapPx(g, c.text, 'sans', 800, Z.w * 0.8, 76 * S, 2), lh = m.px * 1.45, tot = m.lines.length * lh;
+  const y0 = topFor(tot), all = m.lines.reduce((a, l) => a + [...l].length, 0), per = T(1.2) / Math.max(1, all);
+  const done = T(0.3) + per * all, wow = 1 + 0.04 * Math.sin(Math.PI * seg(t, done, done + T(0.35)));
+  const pw = Math.max(...m.lines.map((l) => ink(g, l, m.px, 'sans', 800).w)) / 2 + 40 * S, pa = E.outExpo(seg(t, T(0.3), T(0.6)));
+  g.save(); g.translate(Z.cx, y0 + tot / 2); g.scale(wow, wow);
+  g.strokeStyle = rgba(R.sub, 0.8 * pa); g.lineWidth = 6 * S; g.lineCap = 'round';   // 괄호 (모양)
+  for (const s of [-1, 1]) { g.beginPath(); g.ellipse(s * pw, 0, 28 * S, tot / 2 + 20 * S, 0, s < 0 ? Math.PI * 0.62 : -Math.PI * 0.38, s < 0 ? Math.PI * 1.38 : Math.PI * 0.38); g.stroke(); }
+  let idx = 0;
+  m.lines.forEach((ln, j) => {
+    const lk = ink(g, ln, m.px, 'sans', 800), ly = -tot / 2 + lh / 2 + j * lh; let x = -lk.w / 2;
+    if (t >= done + T(0.02)) {   // 다 또렷해지면 줄 통째로 그리고 물결은 줄 전체로 (선언된 글자 그대로 읽힌다)
+      text(g, ln, 0, ly + Math.sin(t * 5 + j) * 3 * S, m.px, { align: 'c', w: 800, color: R.ink }); idx += [...ln].length; return;
+    }
+    for (const ch of [...ln]) {
+      const cw = g.measureText ? (setFont(g, m.px, 'sans', 800), g.measureText(ch).width) : 0, p = seg(t, T(0.3) + idx * per, T(0.3) + idx * per + T(0.35));
+      if (p > 0 && ch.trim()) { g.save(); g.globalAlpha = p; g.filter = `blur(${((1 - p) * 10 * S).toFixed(2)}px)`;
+        text(g, ch, x + cw / 2, ly - (1 - p) * 26 * S, m.px, { align: 'c', w: 800, color: R.ink }); g.filter = 'none'; g.restore(); }
+      x += cw; idx++;
+    }
+  });
+  g.restore();
+};
+
+// B04 집중선 + 화면 흔들림 — 확 당김 + 흰 번쩍 → 가운데를 비운 집중선 → 떨리다 멈춤 · wow: 첫 순간 선이 가장 빽빽하고 굵게
+TYPES.speedLines = (g, t, d, c) => {
+  const k = kb(d, BASE_DICT.speedLines), T = (x) => x * k;
+  const shake = (1 - seg(t, 0, T(0.5))) * 14 * S, punch = lerp(1.2, 1, E.outExpo(seg(t, 0, T(0.15))));
+  g.save(); g.translate(W / 2 + Math.sin(t * 190) * shake, H / 2); g.scale(punch, punch); g.translate(-W / 2, -H / 2);
+  base(g, t);
+  const px = fit(c.text, 'sans', 900, Z.w * (R.chip ? 0.78 : 0.86), Z.h * 0.22), tk = ink(g, c.text, px, 'sans', 900);
+  const spx = c.sub ? Math.min(fit(c.sub, 'sans', 800, Z.w * 0.9), 54 * S) : 0;
+  const tot = tk.h + (c.sub ? 50 * S + spx : 0), y0 = topFor(tot), cx = FXc(), cy = y0 + tk.h / 2;
+  const fr = Math.floor(t * FPS / 2), first = 1 - seg(t, 0, T(0.3)), hole = Math.max(tk.w * 0.62, 240 * S);
+  g.fillStyle = rgba(R.ink, 0.55 + 0.3 * first);
+  for (let i = 0; i < 70; i++) {   // 흰 가는 쐐기 70개쯤 — 두 프레임마다 새로 그린다 (시드 난수)
+    const a = (i / 70) * TAU + (hash(fr, i, 5) - 0.5) * 0.08, wv = (0.006 + hash(fr, i, 6) * 0.01) * (1 + first * 1.5);
+    const r0 = hole * (1 + hash(fr, i, 7) * 0.35), r1 = Math.max(W, H);
+    g.beginPath(); g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0 * 1.2); g.lineTo(cx + Math.cos(a - wv) * r1, cy + Math.sin(a - wv) * r1); g.lineTo(cx + Math.cos(a + wv) * r1, cy + Math.sin(a + wv) * r1); g.closePath(); g.fill();
+  }
+  const tp = E.outBack(seg(t, T(0.04), T(0.2)));
+  g.save(); g.translate(Z.cx, cy); g.scale(lerp(0.6, 1, tp), lerp(0.6, 1, tp)); text(g, c.text, 0, 0, px, hiWord({ align: 'c', w: 900 })); g.restore();
+  if (c.sub) { const sa = E.outExpo(seg(t, T(0.25), T(0.45))); g.save(); g.globalAlpha = sa; text(g, c.sub, Z.cx, y0 + tk.h + 50 * S + spx / 2, spx, { align: 'c', w: 800, color: R.ink }); g.restore(); }
+  g.restore();
+  const fl = 1 - seg(t, 0, T(0.2)); if (fl > 0) { g.fillStyle = rgba(P.text, 0.75 * fl); g.fillRect(0, 0, W, H); }   // 흰 번쩍 (첫 0.2s)
+};
+
+// T09 전·후 비교 — 한 자리에 겹친 두 화면을 선 하나로 가른다. 세로 화면이라 선은 **위아래로** 움직인다.
+//   전(before) 을 드러낸 뒤 후(after) 를 드러내고 **후에서 머문다**(원 명세는 가운데로 돌아와 끝 — 우리 장면은 컷으로 끝나서 결론 쪽에 멈춘다).
+//   wow: 후가 다 드러나 멈추는 순간 선의 빛이 한 번 번짐
+TYPES.beforeAfter = (g, t, d, c) => {
+  base(g, t); const k = kb(d, BASE_DICT.beforeAfter), T = (x) => x * k, O = onSolid();
+  const lpx = Math.min(56 * S, Z.w * 0.08);
+  const vpx = Math.min(fit(String(c.before.value), 'sans', 900, Z.w * 0.6, Z.h * 0.2), fit(String(c.after.value), 'sans', 900, Z.w * 0.6, Z.h * 0.2));
+  const vk = ink(g, '0', vpx, 'sans', 900), blk = lpx * 1.3 + 30 * S + vk.h, y0 = topFor(blk);
+  const top = y0 - 60 * S, bot = y0 + blk + 60 * S, x0 = Z.cx - Z.w * 0.48, x1 = Z.cx + Z.w * 0.48;
+  // 선 위치 u (0 = 위 끝, 1 = 아래 끝): 선 위 = 전, 선 아래 = 후. 선이 내려가면 전이 넓게, 올라가면 후가 넓게.
+  const u = t < T(1.5) ? lerp(0.5, 1, E.inOutCubic(seg(t, 0, T(0.6)))) : lerp(1, 0, E.inOutCubic(seg(t, T(1.5), T(2.3))));
+  const ly = lerp(top, bot, u);
+  const pane = (which, yA, yB) => {
+    if (yB - yA < 1) return;
+    const v = which === 'before' ? c.before : c.after, fill = which === 'before' ? null : solidCard();
+    g.save(); clipRect(g, x0, yA, x1, yB);
+    if (fill) { g.fillStyle = fill; g.fillRect(x0, top, x1 - x0, bot - top); }
+    text(g, v.label, Z.cx, y0 + lpx * 0.65, lpx, which === 'before' ? { align: 'c', w: 800, color: R.sub } : { align: 'c', w: 800, color: O.sub, on: fill });
+    text(g, String(v.value), Z.cx, y0 + lpx * 1.3 + 30 * S + vk.h / 2, vpx, which === 'before' ? bad({ align: 'c', w: 900 }) : { align: 'c', w: 900, color: O.hi, on: fill });
+    g.restore(); CLIP = null;
+  };
+  pane('before', top, ly); pane('after', ly, bot);
+  const glow = seg(t, T(2.3), T(2.5)) * (1 - seg(t, T(2.5), T(2.9)));
+  g.shadowColor = rgba(P.accent, 1); g.shadowBlur = (14 + glow * 50) * S; g.fillStyle = R.chip ? P.bg : P.text; g.fillRect(x0 - 20 * S, ly - 3 * S, x1 - x0 + 40 * S, 6 * S); g.shadowBlur = 0;
+};
+
+// B17 챕터 진행 바 — 위쪽 얇은 막대에 단원 점 · 줄이 차오르며 점이 켜지고 지금 단원 이름이 커짐 + 가운데 큰 글자로 지금 단원 · wow: 마지막 점에서 막대가 한 번 반짝
+TYPES.progressBar = (g, t, d, c) => {
+  base(g, t); const n = c.chapters.length, k = kb(d, n * 1.2), T = (x) => x * k, seg1 = T(1.2);
+  const bx0 = Z.cx - Z.w * 0.44, bx1 = Z.cx + Z.w * 0.44, lpx = Math.min(...c.chapters.map((s) => Math.min(fit(s, 'sans', 800, (bx1 - bx0) / n * 0.86), 36 * S)));
+  const big = c.chapters.map((s) => fit(s, 'sans', 900, Z.w * 0.9, Z.h * 0.16)), bpx = Math.min(...big), bk = ink(g, c.chapters[0], bpx, 'sans', 900);
+  const total = 18 * S + 30 * S + lpx * 1.3 + 140 * S + bk.h; let y = topFor(total);
+  const fillU = clamp(t / (seg1 * (n - 1) + T(0.4))), pts = c.chapters.map((_, i) => lerp(bx0 + 20 * S, bx1 - 20 * S, n === 1 ? 0 : i / (n - 1)));
+  const cur = Math.min(n - 1, Math.floor(fillU * (n - 1) + 1e-6)), flash = seg(t, seg1 * (n - 1) + T(0.4), seg1 * (n - 1) + T(0.6)) * (1 - seg(t, seg1 * (n - 1) + T(0.6), seg1 * (n - 1) + T(0.9)));
+  roundBox(g, bx0 - 20 * S, y - 10 * S, bx1 - bx0 + 40 * S, 38 * S, 19 * S, rgba(R.chip ? P.bg : P.panel, 0.85 + flash * 0.15));
+  g.strokeStyle = R.chip ? rgba(P.text, 0.35) : P.line; g.lineWidth = 4 * S; g.beginPath(); g.moveTo(pts[0], y + 9 * S); g.lineTo(pts[n - 1], y + 9 * S); g.stroke();
+  g.strokeStyle = P.accent; g.lineWidth = 6 * S; g.beginPath(); g.moveTo(pts[0], y + 9 * S); g.lineTo(lerp(pts[0], pts[n - 1], fillU), y + 9 * S); g.stroke();
+  pts.forEach((x, i) => { const lit = i <= cur; g.fillStyle = lit ? P.accent : (R.chip ? rgba(P.text, 0.45) : P.line); g.beginPath(); g.arc(x, y + 9 * S, (lit ? 11 : 8) * S, 0, TAU); g.fill(); if (i === cur) ring(g, x, y + 9 * S, 20 * S, P.accent, 0.6, 3 * S); });
+  y += 18 * S + 30 * S;
+  c.chapters.forEach((s, i) => {   // 양 끝 이름은 안쪽으로 정렬 — 점에 가운데를 맞추면 막대 밖(글자 구역 밖)으로 나간다
+    const on = i === cur, sc = on ? 1.15 : 1, al = n > 1 && i === 0 ? 'l' : n > 1 && i === n - 1 ? 'r' : 'c', ax = al === 'l' ? bx0 : al === 'r' ? bx1 : pts[i];
+    g.save(); g.translate(ax, y + lpx * 0.65); g.scale(sc, sc); text(g, s, 0, 0, lpx, { align: al, w: 800, color: on ? R.ink : R.sub }); g.restore(); });
+  y += lpx * 1.3 + 140 * S;
+  const into = seg(t, Math.max(0, cur * seg1 - T(0.02)), cur * seg1 + T(0.2)), p = E.outExpo(cur === 0 ? seg(t, 0, T(0.2)) : into);
+  g.save(); clipRect(g, 0, y - 10 * S, W, y + bk.h + 10 * S); text(g, c.chapters[cur], Z.cx, y + bk.h / 2 + (1 - p) * bk.h * 1.3, bpx, hiWord({ align: 'c', w: 900 })); g.restore(); CLIP = null;
+};
+
+// N08 FAQ 카드 넘기기 — 앞면(질문) → 가로로 반 바퀴 뒤집혀 뒷면(질문 작게 + 답 크게) → 머묾 → 날아가고 다음 카드 · wow: 첫 카드 뒤집힐 때 한 번 들렸다 내려앉음 · ⛔ 뒷면 글자 거울 반전 없음
+TYPES.faqFlip = (g, t, d, c) => {
+  base(g, t); const n = c.cards.length, k = kb(d, BASE_DICT.faqFlip * n / 2), T = (x) => x * k, O = onSolid(), H2 = hiFill();
+  const per = 3.5, cw = Z.w * 0.9, pad = 48 * S;
+  const qf = c.cards.map((q) => wrapPx(g, q.q, 'sans', 900, cw - pad * 2, 64 * S, 3)), af = c.cards.map((q) => wrapPx(g, q.a, 'sans', 900, cw - pad * 2, 70 * S, 3));
+  const qs = c.cards.map((q) => wrapPx(g, q.q, 'sans', 700, cw - pad * 2, 38 * S, 2));
+  const chs = c.cards.map((_, i) => Math.max(qf[i].lines.length * qf[i].px * 1.3, qs[i].lines.length * qs[i].px * 1.35 + 40 * S + af[i].lines.length * af[i].px * 1.3) + pad * 2);
+  const ch = Math.max(...chs, Z.h * 0.3), y0 = topFor(ch), x0 = Z.cx - cw / 2;
+  const i = Math.min(n - 1, Math.floor(t / T(per))), lt = t - i * T(per), last = i === n - 1;
+  for (let s = Math.min(2, n - 1 - i); s >= 1; s--) roundBox(g, x0 + s * 22 * S, y0 + s * 26 * S, cw, ch, 30 * S, rgba(R.chip ? P.bg : P.panel, 0.45 / s));   // 뒤 더미 (빈 카드)
+  const rise = i > 0 ? E.outCubic(seg(lt, 0, T(0.3))) : 1, fly = last ? 0 : E.inOutCubic(seg(lt, T(3.1), T(3.5)));
+  const fp = E.inOutCubic(seg(lt, T(0.8), T(1.25))), sx = Math.cos(Math.PI * fp), back = fp >= 0.5;
+  const lift = i === 0 ? Math.sin(Math.PI * seg(lt, T(0.8), T(1.4))) * 30 * S : 0;
+  // 퇴장: 원 명세는 오른쪽 위로 날아가지만 그러면 글자가 글자 구역 밖으로 끌려 나간다 → 제자리에서 살짝 뜨며 작아지고 흐려진다
+  g.save(); g.translate(Z.cx + (1 - rise) * 22 * S, y0 + ch / 2 - lift - fly * 70 * S + (1 - rise) * 26 * S); g.scale(1 - fly * 0.12, 1 - fly * 0.12); g.rotate(fly * 0.04); g.globalAlpha = 1 - fly;
+  g.scale(Math.max(0.001, Math.abs(sx)), 1);   // 반 바퀴 — 가운데를 지나면 뒷면을 **바로 선** 글자로 그린다(거울 반전 없음)
+  if (!back) {
+    roundBox(g, -cw / 2, -ch / 2, cw, ch, 30 * S, H2.fill);
+    const q = qf[i], lh = q.px * 1.3, tt = q.lines.length * lh; q.lines.forEach((ln, j) => text(g, ln, 0, -tt / 2 + lh / 2 + j * lh, q.px, { align: 'c', w: 900, color: H2.fg, on: H2.fill }));
+  } else {
+    roundBox(g, -cw / 2, -ch / 2, cw, ch, 30 * S, solidCard());
+    const q = qs[i], a = af[i], ql = q.px * 1.35, al = a.px * 1.3, tt = q.lines.length * ql + 40 * S + a.lines.length * al;
+    let yy = -tt / 2; q.lines.forEach((ln, j) => text(g, ln, 0, yy + ql / 2 + j * ql, q.px, { align: 'c', w: 700, color: O.sub, on: solidCard() })); yy += q.lines.length * ql + 40 * S;
+    const ap = E.outBack(seg(lt, T(1.2), T(1.45)));
+    g.fillStyle = P.accent; g.beginPath(); g.arc(-cw / 2 + pad * 0.6, yy + al / 2, 12 * S * ap, 0, TAU); g.fill();   // 답 표시 (글자 대신 점)
+    a.lines.forEach((ln, j) => text(g, ln, 0, yy + al / 2 + j * al, a.px, { align: 'c', w: 900, color: O.ink, on: solidCard() }));
+  }
+  g.restore();
+};
+
+for (const k of Object.keys(BASE_DICT)) TYPES_C[k] = TYPES[k];   // 세로 가운데 구도가 기본이라 한 벌
+
+// ── 계약 ─────────────────────────────────────────────────────────────────────
+window.setup = (cfg) => {
+  W = cfg.W; H = cfg.H; P = cfg.palette; F = cfg.fonts; FPS = cfg.fps;
+  const mk = (z) => ({ x0: z.x0, y0: z.y0, x1: z.x1, y1: z.y1, w: z.x1 - z.x0, h: z.y1 - z.y0, cx: (z.x0 + z.x1) / 2, cy: (z.y0 + z.y1) / 2 });
+  Z = ZFULL = mk(cfg.zone); ZUP = cfg.zoneUpper ? mk(cfg.zoneUpper) : null;
+  S = S0 = W / 1080; FS = 1; cv.width = oc.width = W; cv.height = oc.height = H;
+  GROUND0 = cfg.ground || 'dark'; R = roles(GROUND0); LAYOUT0 = cfg.layout || 'left'; MARKS = cfg.marks || 'edge'; FILLBOTTOM = !!cfg.fillBottom; TIMING0 = cfg.timing || null;
+  return (async () => {
+    for (const w of [700, 800, 900]) { await document.fonts.load(`${w} 100px ${F.sans}`, '가0'); await document.fonts.load(`${w} 100px ${F.mono}`, 'a0'); }
+    await document.fonts.ready; return true;
+  })();
+};
+// center 장면의 구역 고르기: 위쪽 구역(버튼 열 위, 가로 76–1004)에 **글자 블록 전체**가 들어가면 그쪽(중심 x 540).
+//   안 들어가면 글자 배율을 0.92 → 0.84 → 0.76 으로 줄여 다시 본다. 그래도 안 되면 예전 구역(76–760 · 중심 418).
+//   판정은 장면의 모든 프레임 × 모션 블러 표본을 시험으로 그린 글자 상자의 합집합으로 한다 (화면에는 안 그린다).
+const pc = document.createElement('canvas'); const px_ = pc.getContext('2d');
+function probeUnion(c) {
+  pc.width = W; pc.height = H; let u = null;
+  // ⛔ 11번 표본은 모자랐다(2026-09-29: 마스크에서 올라오는 f2–f3 을 놓쳐 게이트가 37건 막음) → 게이트가 보는 것과 똑같이
+  //    **모든 프레임 × 모션 블러 표본** 을 그린다
+  const n = Math.round(c.dur * FPS);
+  for (let q = 0; q < n * SAMPLES; q++) {
+    const f = Math.floor(q / SAMPLES), k = q % SAMPLES;
+    BOXES = []; drawAt(px_, Math.min(c.dur, f / FPS + (k / SAMPLES) * SHUTTER / FPS));
+    for (const b of BOXES) u = u ? { x0: Math.min(u.x0, b.x0), y0: Math.min(u.y0, b.y0), x1: Math.max(u.x1, b.x1), y1: Math.max(u.y1, b.y1) } : { ...b };
+  }
+  BOXES = []; return u;
+}
+const zInfo = (z) => ({ x0: z.x0, y0: z.y0, x1: z.x1, y1: z.y1 });
+// 모든 프레임 × 모션 블러 표본의 글자 상자에서: 가장 위 · 가장 아래 · 가로 넘침 · 「넓은 줄(오른쪽 끝 > xR)」이 yU 위에 머물 여유
+function probeStats(c, yU, xR) {
+  pc.width = W; pc.height = H; const n = Math.round(c.dur * FPS); let st = null;
+  for (let q = 0; q < n * SAMPLES; q++) {
+    const f = Math.floor(q / SAMPLES), k = q % SAMPLES;
+    BOXES = []; drawAt(px_, Math.min(c.dur, f / FPS + (k / SAMPLES) * SHUTTER / FPS));
+    for (const b of BOXES) {
+      if (!st) st = { minY0: Infinity, maxY1: -Infinity, xBad: false, wideLimit: Infinity };
+      st.minY0 = Math.min(st.minY0, b.y0); st.maxY1 = Math.max(st.maxY1, b.y1);
+      // ⛔ 가로는 **클립 전** 끝으로 본다 — 구역 클립에 잘린 상자는 들어간 것처럼 보인다(2026-09-29: 244 = 244 가 11% 잘린 채 통과할 뻔)
+      const jit = b.decor || b.jitter;   // 글리치 조각·색 번짐 사본은 일부러 어긋나 구역 클립에 잘린다 — 제자리 사본만 클립 전 폭으로 본다
+      const ux0 = jit ? b.x0 : (b.ux0 ?? b.x0), ux1 = jit ? b.x1 : (b.ux1 ?? b.x1);
+      if (ux0 < ZUP.x0 - 0.5 || ux1 > ZUP.x1 + 0.5) st.xBad = true;
+      if (ux1 > xR + 0.5) st.wideLimit = Math.min(st.wideLimit, yU - b.y1);
+    }
+  }
+  BOXES = []; return st;
+}
+const inside = (u, z) => u.y0 >= z.y0 - 0.5 && u.y1 <= z.y1 + 0.5 && u.x0 >= z.x0 - 0.5 && u.x1 <= z.x1 + 0.5;
+// 비교용 계측만: 이 장면을 예전 구역(76–760 · 1270 까지)·배율 1 로 두고 같은 세로 규칙을 쓰면 블록 중심이 어디인가
+window.probeFullAlt = (c) => {
+  const keep = { Z, S, FS }; Z = ZFULL; S = S0; FS = 1;
+  const u = probeUnion(c); let r = null;
+  if (u) { const h = u.y1 - u.y0, c0 = (u.y0 + u.y1) / 2, target = Math.max(ZFULL.y0 + h / 2, Math.min(H / 2, ZFULL.y1 - h / 2)); r = { h: +h.toFixed(1), cx: +((u.x0 + u.x1) / 2).toFixed(1), cyNow: +c0.toFixed(1), cyRule: +target.toFixed(1) }; }
+  Z = keep.Z; S = keep.S; FS = keep.FS; return r;
+};
+window.setCut = (c) => {
+  if (!TYPES[c.type]) throw new Error('모르는 컷 타입: ' + c.type); CUT = c;
+  if (c.ground) R = roles(c.ground); else if (GROUND0) R = roles(GROUND0);
+  CENTER = (c.layout || LAYOUT0) === 'center';
+  Z = ZFULL; S = S0; FS = 1; FILL = null;
+  let info = { center: CENTER, mode: 'full', scale: 1, zone: zInfo(ZFULL) };
+  if (CENTER && ZUP && c.fill !== false) {
+    // 2026-09-29 개정 — **줄마다** 규칙: 줄 바닥이 버튼 열 시작(ZUP.y1) 위면 오른쪽 끝 ≤ ZUP.x1(1004), 아래면 ≤ ZFULL.x1(760).
+    //   글자 블록 전체는 ZUP.y0–ZFULL.y1(154–1270). 배율은 1.6 부터 내려가며 들어가는 가장 큰 값, 세로는 블록 중심을 H/2 에 가장 가깝게.
+    const ZC = { x0: ZUP.x0, x1: ZUP.x1, y0: ZUP.y0, y1: ZFULL.y1, w: ZUP.w, h: ZUP.h, cx: ZUP.cx, cy: ZUP.cy };
+    const yU = ZUP.y1, xR = ZFULL.x1, tried = [];
+    // 2026-09-29 개정 — **위치 우선**: 배율 1.6–1.0 을 다 시험해 블록 중심이 H/2 에 가장 가까운 배율(같으면 큰 배율)을 고른다.
+    //   하한 1.0. 1.0 에서도 안 들어갈 때만 0.92 → 0.76 을 차례로 본다(보고용 기록).
+    const cands = [];
+    for (const fs of [1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0]) {
+      Z = ZC; FS = fs; S = S0 * fs;
+      const p0 = probeStats(c, yU, xR);
+      if (!p0 || p0.xBad) { tried.push({ fs, why: p0 ? '가로 넘침' : '글자 없음' }); continue; }
+      const dyMin = ZC.y0 + 1 - p0.minY0, dyMax = Math.min(ZC.y1 - 1 - p0.maxY1, p0.wideLimit - 1);
+      if (dyMin > dyMax + 0.01) { tried.push({ fs, why: '세로 자리 없음' }); continue; }
+      const c0 = (p0.minY0 + p0.maxY1) / 2, dy = Math.max(dyMin, Math.min(dyMax, H / 2 - c0));
+      cands.push({ fs, dy, dist: Math.abs(c0 + dy - H / 2), cy: c0 + dy });
+    }
+    cands.sort((a, b) => (Math.abs(a.dist - b.dist) > 1 ? a.dist - b.dist : b.fs - a.fs));
+    const order = [...cands.map((x) => x.fs), 0.92, 0.84, 0.76];
+    for (const fs of order) {
+      Z = ZC; FS = fs; S = S0 * fs;
+      const p0 = probeStats(c, yU, xR);
+      if (!p0 || p0.xBad) { tried.push({ fs, why: p0 ? '가로 넘침' : '글자 없음' }); continue; }
+      // 경계는 1px 안쪽으로 — safe-zone 검사가 「바닥 > 1270」 처럼 엄격 부등호라 딱 붙이면 반올림으로 걸린다 (2026-09-29 실측)
+      const dyMin = ZC.y0 + 1 - p0.minY0, dyMax = Math.min(ZC.y1 - 1 - p0.maxY1, p0.wideLimit - 1);
+      if (dyMin > dyMax + 0.01) { tried.push({ fs, why: '세로 자리 없음' }); continue; }
+      const c0 = (p0.minY0 + p0.maxY1) / 2, dy = Math.max(dyMin, Math.min(dyMax, H / 2 - c0));
+      Z = { ...ZC, cy: ZC.cy + dy };
+      const p1 = probeStats(c, yU, xR);
+      if (p1 && !p1.xBad && p1.minY0 >= ZC.y0 && p1.maxY1 < ZC.y1 && p1.wideLimit >= 0) {
+        // 글자 블록 아래가 140px 넘게 비면 채움 띠를 켠다 (글자 없는 장식 — 개수·분포를 암시하지 않는다)
+        const fy0 = p1.maxY1 + 50 * S0, fy1 = ZC.y1;
+        FILL = fy1 - fy0 > 140 * S0 ? { y0: fy0, y1: fy1 } : null;
+        info = { center: true, mode: 'fill', scale: fs, zone: zInfo(ZC), perLine: { yU, xR }, tried, cands: cands.map((x) => ({ fs: x.fs, cy: +x.cy.toFixed(1) })), blockH: +(p1.maxY1 - p1.minY0).toFixed(1), target: +((p1.minY0 + p1.maxY1) / 2).toFixed(1), fillBand: FILL ? [Math.round(FILL.y0), Math.round(FILL.y1)] : null };
+        break;
+      }
+      tried.push({ fs, why: '옮긴 뒤 넘침' }); Z = ZFULL; FS = 1; S = S0;
+    }
+    if (info.mode === 'full') { Z = ZFULL; FS = 1; S = S0; info.tried = tried; }
+  } else if (CENTER && ZUP) {
+    const tried = [];
+    for (const fs of [1, 0.92, 0.84, 0.76]) {
+      Z = ZUP; FS = fs; S = S0 * fs;
+      const u = probeUnion(c); tried.push({ fs, bottom: u ? Math.round(u.y1) : null });
+      if (u && inside(u, ZUP)) {
+        // 세로: 블록 중심 = min(프레임 중심, 위쪽 구역 아래 끝 − h/2) · 위 끝은 구역 위 끝 아래 (2026-09-29 개정)
+        const h = u.y1 - u.y0, c0 = (u.y0 + u.y1) / 2, target = Math.max(ZUP.y0 + h / 2, Math.min(H / 2, ZUP.y1 - h / 2));
+        Z = { ...ZUP, cy: ZUP.cy + (target - c0) };
+        const u2 = probeUnion(c);
+        if (!(u2 && inside(u2, ZUP))) Z = ZUP;   // 옮긴 뒤 구역을 벗어나면 옮기지 않는다
+        info = { center: true, mode: 'upper', scale: fs, zone: zInfo(ZUP), tried, blockH: +h.toFixed(1), target: +target.toFixed(1), shifted: Z !== ZUP };
+        break;
+      }
+      Z = ZFULL; FS = 1; S = S0;
+    }
+    if (info.mode === 'full') info.tried = tried;
+  }
+  return info;
+};
+window.TYPES = Object.keys(TYPES);
+// fillBottom — 1270–1920(캡션·프로필 자리)을 글자 없는 장식으로 옅게 채운다. 기본 끔.
+//   ⛔ 글자 없음 · 개수를 셀 수 있는 모양(막대·점) 없음 — 연속된 선(격자·파형·훑는 선)만. 앱 캡션 글자가 읽혀야 해서 불투명도는 낮게.
+function fillBottomBand(g, t) {
+  const y0 = ZFULL.y1, y1 = H, gs = 54 * S0, a = E.outExpo(seg(t, 0.05, 0.35)); if (a <= 0) return;
+  g.save(); g.globalAlpha = a;
+  g.strokeStyle = rgba(R.ink, 0.07); g.lineWidth = 2 * S0; g.beginPath();
+  for (let x = gs; x < W; x += gs) { g.moveTo(x + 0.5, y0); g.lineTo(x + 0.5, y1); }
+  for (let y = Math.ceil(y0 / gs) * gs; y < y1; y += gs) { g.moveTo(0, y + 0.5); g.lineTo(W, y + 0.5); }
+  g.stroke();
+  const wy = y0 + (y1 - y0) * 0.38, amp = 26 * S0;
+  g.strokeStyle = rgba(R.hi, 0.16); g.lineWidth = 4 * S0; g.lineJoin = 'round'; g.beginPath();
+  for (let k = 0; k <= 180; k++) { const u = k / 180, x = u * W, yy = wy + Math.sin(u * 18 - t * 6) * amp * (0.55 + 0.45 * Math.sin(u * 5 + t * 2)); k ? g.lineTo(x, yy) : g.moveTo(x, yy); }
+  g.stroke();
+  const sy = y0 + fract(t * 0.5 + 0.3) * (y1 - y0);
+  g.fillStyle = rgba(R.hi, 0.12); g.fillRect(0, sy, W, 2 * S0);
+  g.restore();
+}
+function fillBand(g, t) {   // 격자 강조: 프레임 중심 대칭 · 굵은 격자 + 모서리 괄호 + 위→아래로 훑는 선
+  const hw = Math.max(W / 2 - Z.x0, Z.x1 - W / 2), x0 = W / 2 - hw, x1 = W / 2 + hw, { y0, y1 } = FILL, gs = 54 * S0;
+  const a = E.outExpo(seg(t, 0.05, 0.35)); if (a <= 0) return;
+  g.save(); g.globalAlpha = a;
+  g.strokeStyle = rgba(R.ink, 0.16); g.lineWidth = 2 * S0; g.beginPath();
+  for (let x = Math.ceil(x0 / gs) * gs; x <= x1; x += gs) { g.moveTo(x + 0.5, y0); g.lineTo(x + 0.5, y1); }
+  for (let y = Math.ceil(y0 / gs) * gs; y <= y1; y += gs) { g.moveTo(x0, y + 0.5); g.lineTo(x1, y + 0.5); }
+  g.stroke();
+  if (MARKS === 'scene') brackets(g, x0, y0, x1 - x0, y1 - y0, 40 * S0, R.mark, 3 * S0);   // edge · none 에서는 채움 띠 괄호를 뺀다
+  const sy = y0 + fract(t * 0.9) * (y1 - y0), gr = g.createLinearGradient(0, sy - 60 * S0, 0, sy);
+  gr.addColorStop(0, rgba(R.hi, 0)); gr.addColorStop(1, rgba(R.hi, 0.35)); g.fillStyle = gr; g.fillRect(x0, sy - 60 * S0, x1 - x0, 60 * S0);
+  g.fillStyle = rgba(R.hi, 0.8); g.fillRect(x0, sy, x1 - x0, 3 * S0);
+  g.restore();
+}
+function brackets(g, x, y, w, h, L, col, lw) { g.strokeStyle = col; g.lineWidth = lw; g.beginPath(); for (const [px2, py2, dx, dy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]]) { g.moveTo(px2, py2 + L * dy); g.lineTo(px2, py2); g.lineTo(px2 + L * dx, py2); } g.stroke(); }
+const fract = (x) => x - Math.floor(x);
+// ── 머무는 구간만 늘린다 (2026-09-30 사용자 결정 · 모션그래픽 주문 사전 compose.js 규칙) ──
+//   장면이 설계 길이(BASE_SCALE)보다 길어지면 **등장·전환 박자는 설계 길이 그대로** 두고 남는 시간은 끝에서 머문다.
+//   예전에는 d 에 비례해 박자가 늘어져서, 말이 긴 장면일수록 숫자가 느리게 세어지고 늦게 박혔다.
+//   짧아질 때는 예전처럼 비율(d 그대로). 말 큐로 준 초(switchSec 등)는 절대 초라 영향이 없다(x/d·d = x).
+//   설계 길이 = V-E(reels-rule-silent.fullmotion.json · 고정 길이판)에서 그 타입에 준 길이.
+//   ⛔ layout left(V-D·V-E) 는 예전 그대로(scale) — 그 코드는 클립 md5 로 안 바뀐 걸 확인한다.
+const BASE_SCALE = { numberPunch: 1.5, contrastCounter: 1.8, glitchEquation: 1.6, setSplit: 1.2 };
+let TIMING0 = null;   // setup cfg.timing: 'hold' | 'scale' · 없으면 center = hold · left = scale
+function dFor(c) {
+  const mode = c.timing || TIMING0 || (CENTER ? 'hold' : 'scale'), b = c.designDur ?? BASE_SCALE[c.type];
+  return mode === 'hold' && b ? Math.min(c.dur, b) : c.dur;
+}
+function drawAt(g, t) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over'; CLIP = null; ((CENTER && TYPES_C[CUT.type]) || TYPES[CUT.type])(g, clamp(t, 0, CUT.dur), dFor(CUT), CUT); if (CENTER && FILL) fillBand(g, clamp(t, 0, CUT.dur)); if (CENTER && FILLBOTTOM) fillBottomBand(g, clamp(t, 0, CUT.dur)); g.restore(); CLIP = null; }
+// 잉크 무게중심 — 바탕색에서 thr 넘게 벗어난 픽셀을 편차로 가중해 평균 (보고용 계측 · 렌더에는 안 쓴다)
+window.inkCentroid = (thr = 60) => {
+  const hex = R.ground, gr = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+  const d = mc.getImageData(0, 0, W, H).data; let sw = 0, sx = 0, sy = 0;
+  for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x += 2) { const i = (y * W + x) * 4; const dv = Math.max(Math.abs(d[i] - gr[0]), Math.abs(d[i + 1] - gr[1]), Math.abs(d[i + 2] - gr[2])); if (dv > thr) { sw += dv; sx += dv * x; sy += dv * y; } }
+  return sw ? { x: sx / sw, y: sy / sw } : null;
+};
+window.frame = (t) => {
+  BOXES = [];
+  mc.setTransform(1, 0, 0, 1, 0, 0);
+  for (let k = 0; k < SAMPLES; k++) {
+    const ts = Math.min(CUT.dur, t + (k / SAMPLES) * SHUTTER / FPS);
+    drawAt(ox, ts); mc.globalAlpha = 1 / (k + 1); mc.drawImage(oc, 0, 0); mc.globalAlpha = 1;
+  }
+  return BOXES;
+};
+</script></body></html>

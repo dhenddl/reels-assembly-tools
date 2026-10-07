@@ -21,7 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { resolve, dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tryWriteReelCaption, readPublishDate, drivePathFor } from './reel-caption.mjs';
+import { tryWriteReelCaption, readPublishDate, drivePathFor, captionSidecars } from './reel-caption.mjs';
 import { loadTheme, rgba } from './palette.mjs';
 import { 구도 } from './safe-zone.mjs';
 import { renderRecipePath } from './lines-path.mjs';
@@ -672,7 +672,8 @@ if (args.drive) {
     process.exit(1);
   }
 
-  const toUpload = [outAbs, ...(captionOut ? [captionOut] : [])];
+  const toUpload = [outAbs, ...captionSidecars(captionOut)];   // 캡션 + (isAiGenerated 회차면) AI 라벨 안내
+
   for (const f of toUpload) {
     // copy(폴더로 복사, 원래 이름 유지)가 아니라 copyto(대상 파일명 지정)를 쓴다 — 이름을 바꿔 올리려면 필수.
     const dest = drivePathFor(args.drive, f, pubDate);

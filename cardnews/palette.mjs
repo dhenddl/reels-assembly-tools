@@ -14,6 +14,8 @@
 //
 // 넣은 키만 덮어쓰고 나머지는 아래 기본값을 쓴다.
 
+import { existsSync } from "node:fs";
+
 // ⚠️ 이 값이 지금까지 발행한 카드·릴스의 색이다. 바꾸면 과거분과 어긋난다.
 export const DEFAULT_PALETTE = {
   bg:        "#0d1117",   // 슬라이드 바탕
@@ -29,10 +31,51 @@ export const DEFAULT_PALETTE = {
   dots:      ["#ff5f56", "#ffbd2e", "#27c93f"],  // 터미널 신호등 3개
 };
 
+// ⚠️ 2026-10-07 정정: sans 첫 순위가 'Pretendard Variable' 이었는데 이 PC 에 설치된 적이 없다.
+//    🔬 레지스트리 글꼴 389개에 0 · 크로미움에서 'Pretendard Variable', monospace 너비 = monospace 너비(800.0).
+//    ▶ 지금까지 발행한 한글 sans 는 전부 대체 다음 순위 'Noto Sans KR' 로 그려졌다. 그 모양을 정본으로 고정한다
+//    (사용자 결정 — 「Noto Sans KR 고정」). Pretendard 를 스택에 남겨두면 누가 설치하는 날 화면이 조용히 바뀐다.
+//    🔬 스택만 바꾼 렌더 = 바꾸기 전과 스틸 10/10 바이트 동일(reels-one-command --stills) — Pretendard 가 한 번도 안 쓰였다는 세 번째 확인.
+//    ▶ 시스템에 기대는 위험은 @font-face 가 아니라 assertFontsResolve() 게이트로 막는다(빠지면 렌더 전에 던진다).
+//    ⛔ @font-face 로 파일을 거는 건 시험했고 뺐다 — 같은 파일인데 url()·local() 둘 다 스틸 2/10(01 termCard·05 limits)이
+//       바뀌었다(잉크 중심 y 703→698). 변수 글꼴 굵기를 시스템 경로와 다르게 그린다. 「화면 안 바뀐다」가 사용자 결정의 조건이다.
 export const DEFAULT_FONTS = {
-  sans: "'Pretendard Variable', Pretendard, 'Noto Sans KR', 'Malgun Gothic', sans-serif",
+  sans: "'Noto Sans KR', 'Malgun Gothic', sans-serif",
   mono: "'Cascadia Code', 'D2Coding', Consolas, monospace",
 };
+
+// 저장소에 같이 든 글꼴 사본 (Noto Sans KR 변수 글꼴 · SIL OFL 1.1 — 재배포 가능 · C:/Windows/Fonts 와 md5 같음).
+// ▶ 다른 PC 에서 렌더하면 이 파일을 **시스템에 설치**한다(위 이유로 @font-face 아님). 안 깔려 있으면 게이트가 멈춘다.
+export const FONT_FILES = {
+  "Noto Sans KR": "assets/fonts/NotoSansKR-VF.ttf",
+};
+
+/**
+ * 스택 첫 순위 글꼴이 실제로 그려지는지 렌더 페이지 안에서 잰다. 아니면 던진다.
+ * ⛔ document.fonts.check() 로 판정하지 않는다 — 없는 글꼴에도 true 를 준다.
+ * 판정: 그 글꼴 + 대체(monospace·serif) 너비가 대체 단독 너비와 둘 다 같으면 없는 것이다.
+ */
+export async function assertFontsResolve(page, fonts) {
+  const fams = Object.entries(fonts).map(([k, v]) => [k, v.split(",")[0].trim().replace(/^['"]|['"]$/g, "")]);
+  const bad = await page.evaluate(async (fams) => {
+    await document.fonts.ready;
+    const c = document.createElement("canvas").getContext("2d"), s = "ABCabc 가나다라 0123 모션";
+    const w = (f) => { c.font = `64px ${f}`; return c.measureText(s).width; };
+    const out = [];
+    for (const [k, fam] of fams) {
+      await document.fonts.load(`64px '${fam}'`, s).catch(() => {});
+      if (w(`'${fam}', monospace`) === w("monospace") && w(`'${fam}', serif`) === w("serif")) out.push(`${k}: '${fam}'`);
+    }
+    return out;
+  }, fams);
+  if (!bad.length) return;
+  const msg = `글꼴이 실제로 안 그려진다(대체 글꼴로 빠짐) — ${bad.join(" · ")}`;
+  // 글꼴 사본이 저장소에 있으면(= 글꼴을 정본으로 고정한 우리 저장소) 멈춘다.
+  // 공개 자료로 받은 사람에게는 사본이 없다 — 그 PC 에서는 대체 글꼴로 그려도 되므로 경고만 한다.
+  const pinned = Object.values(FONT_FILES).some((f) => existsSync(new URL(f, import.meta.url)));
+  if (pinned) throw new Error(`${msg}. ${Object.values(FONT_FILES).join(", ")} 를 시스템에 설치한다`);
+  console.warn(`⚠️ ${msg} — 화면 글꼴이 달라질 수 있다. 같게 하려면 Noto Sans KR 을 설치한다(무료 · Google Fonts).`);
+}
 
 // ⚠️ 색은 반드시 `#rgb`/`#rrggbb`다 — 글로우와 표 강조는 이 값에서 rgba를 만들어
 //    쓰기 때문에 `green`이나 `rgb(...)`를 넣으면 그 두 군데만 조용히 깨진다.

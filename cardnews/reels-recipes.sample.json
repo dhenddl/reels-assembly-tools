@@ -1,11 +1,12 @@
 {
   "_이게 뭔가": "릴스 조립 레시피 샘플. 회차 하나가 레시피 하나다. assemble-reel.mjs · render-reels.mjs 가 이 파일을 읽는다.",
-  "_이건 샘플이다": "우리 저장소의 reels-recipes.json 에서 **이미 발행이 끝난 회차 둘만** 옮겨왔다. 미발행 회차와 실험 설계 블록(_skeletonExperiment)은 뺐다 — 그건 발행 전 콘텐츠 계획이라 공개 대상이 아니다.",
+  "_이건 샘플이다": "우리 저장소의 reels-recipes.json 에서 **이미 발행이 끝난 회차 셋만** 옮겨왔다(reels-297 · reels-hookfix · reels-rule-silent). 미발행 회차와 실험 설계 블록(_skeletonExperiment)은 뺐다 — 그건 발행 전 콘텐츠 계획이라 공개 대상이 아니다.",
   "_쓰는 법": [
     "1. 이 파일을 reels-recipes.json 으로 복사한다.",
     "2. recipes[] 를 여러분 회차로 바꾼다. slug 가 출력 폴더 이름이 된다.",
-    "3. cardnews/lines/<slug>.txt 에 화면 대본을 쓴다 — 터미널 화면에 찍힐 글자를 줄 그대로. 견본 두 회차(reels-297 · reels-hookfix) 대본은 같이 들어 있다. ⛔ 이 폴더가 없으면 render-reels 가 렌더 전에 멈춘다(exit 1).",
+    "3. cardnews/lines/<slug>.txt 에 화면 대본을 쓴다 — 터미널 화면에 찍힐 글자를 줄 그대로. 견본 세 회차(reels-297 · reels-hookfix · reels-rule-silent) 대본은 같이 들어 있다. ⛔ 이 폴더가 없으면 render-reels 가 렌더 전에 멈춘다(exit 1).",
     "4. node render-reels.mjs <slug> 로 렌더하고 hook-check.mjs · reel-review.mjs 로 검사한다.",
+    "5. (선택) 훅과 CTA 사이를 코드 모션 장면으로 채우려면 cardnews/motion/motion-reels/README.md 를 따른다 — 4번에서 만든 영상이 기반 영상이 되고, 장면 JSON 의 글자는 이 레시피와 대본에 있는 것만 쓸 수 있다. 견본은 reels-rule-silent.fullmotion.json.",
     "⚠️ 값은 우리 실측이다. 여러분 숫자로 바꾸지 않으면 남의 숫자가 나간다."
   ],
   "_필드": {
@@ -49,6 +50,19 @@
       "hookBadge": "3초 이탈률 궤적 · 7~8월",
       "hookText": "형식을 만질수록\\n나빠졌다",
       "hookSub": "69.4% → 89.0%.\\n소재를 바꾸니 65.5%."
+    },
+    {
+      "slug": "reels-rule-silent",
+      "publishDate": "2026-09-30",
+      "title": "log.md",
+      "cmd": "grep -c \"스킬 파일 수정\" log.md",
+      "outro": "지켜지게 만들었더니 이번엔 규칙이 틀렸다",
+      "hookBadge": "여드레 · 보고 8회 · 수정 0회",
+      "hookText": "같은 결함을 여드레\\n여덟 번 적었습니다",
+      "hookSub": "안 지켜진 이유가 의지가 아니라\\n틀려도 소리가 안 나서였어요.",
+      "skeleton": true,
+      "_소재": "같은 결함 여드레 · 보고 8회 · 수정 0회 · 고장났을 때 잡힌 항목 0건 vs 정상 23건. 다음 날 고쳤더니 이번엔 규칙이 틀렸다 — 사이트맵 244 = 244 로 신규 0 을 냈는데 실제 신규가 살아 있었고, 같은 날 anthropic.com/news 도 13 = 13 인데 집합이 2건 갈렸다.",
+      "_note": "모션 렌더러 견본의 기반 회차. 장면 JSON 의 setSplit.apart 가 위 _소재 의 「2건」을 출처로 쓴다 — 레시피·대본에 없는 숫자는 그림으로 암시할 수 없다. cardnews/motion/motion-reels/reels-rule-silent.fullmotion.json 이 이 slug 의 레시피와 대본(lines/reels-rule-silent.txt)에서 화면 글자의 출처를 찾는다 — 레시피·대본에 없는 글자는 렌더가 멈춘다."
     }
   ]
 }

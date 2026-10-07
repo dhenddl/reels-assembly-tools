@@ -4,4 +4,13 @@ out/
 cardnews/lines/*
 !cardnews/lines/reels-297.txt
 !cardnews/lines/reels-hookfix.txt
+# 모션 렌더러 견본 대본 (2026-10-02 · 9/30 발행 끝난 회차)
+!cardnews/lines/reels-rule-silent.txt
+# 모션 렌더러가 폴더 안에 쓰는 산출물 — 받는 사람이 만든다
+cardnews/motion/motion-reels/stills/
+cardnews/motion/motion-reels/clips/
+cardnews/motion/motion-reels/voice/
+cardnews/motion/motion-reels/*.mp4
+cardnews/motion/motion-reels/*.bounds.json
+cardnews/motion/motion-reels/layout-*.json
 .env

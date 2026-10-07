@@ -82,7 +82,7 @@ import { tmpdir } from 'node:os';
 import { synthWav, STYLES, DEFAULT_STYLE } from './make-hook-sfx.mjs';
 import { resolve, dirname, basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { reelPublishDate, uploadReelToDrive } from './reel-caption.mjs';
+import { reelPublishDate, uploadReelToDrive, captionSidecars } from './reel-caption.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -225,7 +225,8 @@ if (args.drive) {
   const slug = basename(dirname(outAbs));
   const pubDate = reelPublishDate(slug);   // 매니페스트 → 레시피 순으로 본다
   const caption = join(dirname(outAbs), `${slug}-reels-caption.txt`);
-  const files = [outAbs, ...(existsSync(caption) ? [caption] : [])];
+  // 캡션 txt 와 (isAiGenerated 회차면) AI 라벨 안내 txt 를 같이 올린다 — reel-caption.mjs 2026-10-02 절.
+  const files = [outAbs, ...captionSidecars(caption)];
   const up = uploadReelToDrive({ files, pubDate, remote: args.drive, rclone: args.rclone });
   if (up.ok) {
     console.log(`✅ 드라이브 업로드 ${up.uploaded.length}건 — 폰에서 받을 수 있다`);
