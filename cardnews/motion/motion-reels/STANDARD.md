@@ -30,4 +30,4 @@
 - 사본: `pipeline/cardnews/assets/fonts/NotoSansKR-VF.ttf`(OFL). 다른 PC 에서 렌더하면 이걸 **시스템에 설치**한다.
 - ✅ 직접 적힌 Pretendard 도 뺐다(2026-10-07): `make-reels.mjs` · `motion/mockups.html` → Noto 첫 순위. 🔬 옛·새 스택 글자 폭 400·800 둘 다 같음.
 - ⚠️ `make-making-of.mjs` · `feed-spill/cover*.html` 은 목록에 Noto 가 **없어서** 지금까지 **맑은 고딕**이었다(폭 대조로 Noto 와 다름 확인). 화면을 안 바꾸려고 맑은 고딕으로 적었다 — 브랜드 기본(Noto)과 다르다. 다음에 그 도구로 새 회차를 만들 때 Noto 로 맞출지 정한다.
-- ⚠️ 글꼴 게이트는 모션 렌더러(`lib.mjs`)에만 걸려 있다.
+- ✅ 글꼴 게이트를 넓혔다(2026-10-07): 모션 릴스(`lib.mjs`) + 카드뉴스 `render.js` · `make-termcast` · `make-reels` · 모션 캐러셀 `make-motion-slides` · `overlay-lines`. 🔬 바꾸기 전·후 카드뉴스 8장 · 모션 캐러셀 18장 · 터미널 릴스 mp4 md5 같음 · 음성 대조(없는 글꼴 지정 덱) 카드뉴스 exit 1 · 0장. 블로그 이미지 `render-blog` 는 볼트 몫이라 안 건드렸다.

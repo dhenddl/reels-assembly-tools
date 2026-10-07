@@ -22,7 +22,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node
 import { resolve, dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tryWriteReelCaption, readPublishDate, drivePathFor, captionSidecars } from './reel-caption.mjs';
-import { loadTheme, rgba } from './palette.mjs';
+import { loadTheme, rgba, assertFontsResolve } from './palette.mjs';
 import { 구도 } from './safe-zone.mjs';
 import { renderRecipePath } from './lines-path.mjs';
 
@@ -570,6 +570,7 @@ if (args.skeleton) {
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
 await page.setContent(html, { waitUntil: 'networkidle' });
+await assertFontsResolve(page, fonts);   // 글꼴 검사 (2026-10-07) — 스택 첫 글꼴이 대체로 빠지면 멈춘다(palette.mjs assertFontsResolve)
 for (let f = 0; f < nFrames; f++) {
   const t = (f / args.fps) * 1000;
   await page.evaluate((tt) => window.frame(tt), t);
