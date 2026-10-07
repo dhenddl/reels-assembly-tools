@@ -317,6 +317,8 @@ body { font-family:${fonts.mono}; color:var(--text); }
       실제로 그려지는 것은 **Noto Sans KR** 이고 **그 폰트의 숫자는 이미 등폭**이라 바꿀 것이 없었다.
       ▶ **그래도 지우지 않는다**: Pretendard 가 설치되는 순간 스택 1번이 잡히고, 그 폰트의 숫자 폭 거동은
         확인하지 않았다. 그때 이 한 줄이 보험이 된다.
+      ✏️ 2026-10-07: palette.mjs 가 sans 스택에서 Pretendard 를 뺐다(사용자 결정 「Noto Sans KR 고정」) — 이제 설치돼도 안 잡힌다.
+        tabular-nums 는 그대로 둔다. 대체 글꼴로 빠지는 건 motion 렌더러의 assertFontsResolve 가 막는다.
       ★ 이건 mono 스택과 **같은 상태다** — palette.mjs 가 Cascadia Code / D2Coding 을 선언하지만
         둘 다 미설치라 지금까지 모든 렌더가 Consolas 였다. **sans 도 선언과 실제가 다르다.**
         폰트를 설치하는 것이 과거 발행분과 신규분을 갈라놓는다는 경고가 여기에도 적용된다.

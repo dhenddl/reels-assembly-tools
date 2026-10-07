@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { loadTheme } from '../../palette.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { loadVoice, ensureVoice, applyTiming, mapping, buildAudio, measureLoudness, cueSec } from './voice.mjs';
-import { HERE, ffmpegPath, norm, loadSources, provenanceOf, checkShapes, makeZone, makeChecker, openPage, renderClip, renderStill, finalChecks } from './lib.mjs';
+import { HERE, ffmpegPath, norm, loadSources, provenanceOf, checkShapes, makeZone, makeChecker, openPage, renderClip, renderStill, finalChecks, printTypo } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : d; };
@@ -103,6 +103,7 @@ if (LAYOUT === 'center') {
 }
 finalChecks({ provenance, items, chk, errs });
 console.log(`\n글자 구역 검사: 통과 (${STILLS ? '중간 프레임' : '전 프레임'} · 그려진 글자 ${chk.drawn.size}종)`);
+printTypo(chk, { stills: STILLS });
 if (STILLS) {
   console.log(`\n구도 계측 (${LAYOUT} · 장면 ${STILL_AT === 'end' ? '마지막' : '중간'} 프레임) — 글자 구역 중심 (${((zone.x0 + zone.x1) / 2).toFixed(0)}, ${((zone.y0 + zone.y1) / 2).toFixed(0)})${zone.upper ? ` · 위쪽 구역 중심 (${((zone.upper.x0 + zone.upper.x1) / 2).toFixed(0)}, ${((zone.upper.y0 + zone.upper.y1) / 2).toFixed(0)})` : ''} · 프레임 중심 x ${W / 2}`);
   for (const r of layoutRows) console.log(`  ${r.scene} ${r.type.padEnd(16)} 글자 블록 중심 (${r.text ? r.text.cx.toFixed(0) + ', ' + r.text.cy.toFixed(0) : '—'})  잉크 무게중심 (${r.ink ? r.ink.x.toFixed(0) + ', ' + r.ink.y.toFixed(0) : '—'})`);

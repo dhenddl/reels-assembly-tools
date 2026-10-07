@@ -121,6 +121,11 @@ export const CONTRAST_MIN = 4.5;   // WCAG AA 본문 기준 — 큰 글자(3.0) 
 // ── 프레임 검사기: 구역 · 대비 · 그려진 글자 · 보인 시간 ─────────────────────
 export function makeChecker({ W, H, zone }) {
   const drawn = new Map(), contrastSeen = new Map(), zoneFails = [], vis = new Map();
+  // 모션 기준(STANDARD.md) 5번·4번 측정 — 경고만, 차단 아님 (2026-10-07)
+  //   글자 크기: 다 드러난 글자(불투명 0.9·노출 0.9 이상)의 화면 px 최소값. 기준 본문 46px(1080 폭)
+  //   움직임: 같은 글자가 앞 프레임보다 위치·크기·불투명도가 바뀐 개수. 기준 한 장면 2~3개
+  //   ⚠️ 글자만 센다 — 도형·선·칩·카운터 숫자 바뀜·타이핑으로 늘어나는 글자는 안 센다
+  const typo = new Map();
   // info = setCut 이 돌려준 장면 구역 (center 면 세로반영 검사 · 위쪽 구역이면 그 경계로 본다)
   function check(boxes, key, label, f, info) {
     const seenThisFrame = new Set(); const zz = info && info.zone ? info.zone : zone, 세로 = !!(info && info.center);
@@ -134,8 +139,18 @@ export function makeChecker({ W, H, zone }) {
       if (!b.decor && (b.alpha ?? 1) >= 0.9 && (b.shown ?? 1) >= 0.9) seenThisFrame.add(`${key}|${b.str}`);
     }
     for (const k of seenThisFrame) vis.set(k, (vis.get(k) || 0) + 1);
+    let t = typo.get(key); if (!t) typo.set(key, t = { label, minPx: Infinity, minStr: '', small: new Set(), prev: new Map(), maxMove: 0, over: 0, frames: 0 });
+    const cur = new Map(); let moving = 0;
+    for (const b of boxes) {
+      if (b.decor) continue;
+      const g = { cx: (b.x0 + b.x1) / 2, cy: (b.y0 + b.y1) / 2, px: b.px, a: b.alpha ?? 1 }; cur.set(b.str, g);
+      if ((b.alpha ?? 1) >= 0.9 && (b.shown ?? 1) >= 0.9 && b.px) { if (b.px < t.minPx) { t.minPx = b.px; t.minStr = b.str; } if (b.px < 46) t.small.add(b.str); }
+      const q = t.prev.get(b.str);
+      if (q && (Math.abs(q.cx - g.cx) > 0.5 || Math.abs(q.cy - g.cy) > 0.5 || Math.abs(q.px - g.px) > 0.25 || Math.abs(q.a - g.a) > 0.01)) moving++;
+    }
+    t.prev = cur; t.frames++; if (moving > t.maxMove) t.maxMove = moving; if (moving > 3) t.over++;
   }
-  return { check, drawn, contrastSeen, zoneFails, vis };
+  return { check, drawn, contrastSeen, zoneFails, vis, typo };
 }
 
 // ── 페이지 · 클립 ────────────────────────────────────────────────────────────
@@ -198,4 +213,15 @@ export function finalChecks({ provenance, items, chk, errs }) {
   const declSet = new Set(provenance.map((p) => `${p.key}|${norm(p.str)}`)); const low = [];
   for (const [k, o] of chk.contrastSeen) { if (declSet.has(`${o.key}|${norm(o.str)}`)) console.log(`  ${o.v.toFixed(2).padStart(5)}:1  ${k}`); if (o.v < CONTRAST_MIN) low.push(k); }
   if (low.length) { console.error(`⛔ 대비 ${CONTRAST_MIN}:1 미만 ${low.length}건:\n  ` + low.join('\n  ')); process.exit(1); }
+}
+
+// 모션 기준 측정 결과를 찍는다 (경고만). stills 는 장면당 한 프레임이라 움직임은 못 센다
+export function printTypo(chk, { stills = false } = {}) {
+  console.log(`
+모션 기준 측정 (경고만 · STANDARD.md · 글자만 센다)`);
+  for (const t of chk.typo.values()) {
+    const px = Number.isFinite(t.minPx) ? `최소 글자 ${t.minPx.toFixed(0)}px 「${t.minStr}」${t.small.size ? ` ⚠️ 46px 미만 ${t.small.size}종` : ''}` : '최소 글자 —(다 드러난 글자 없음)';
+    const mv = stills ? '움직임 —(stills)' : `동시에 움직이는 글자 최대 ${t.maxMove}${t.over ? ` ⚠️ 3개 초과 ${t.over}/${t.frames} 프레임` : ''}`;
+    console.log(`  ${t.label} ${px} · ${mv}`);
+  }
 }
