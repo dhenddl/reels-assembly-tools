@@ -28,6 +28,24 @@
 | `cardnews/check-sources.mjs` | 쓰인 원본 소스가 기록돼 있는지 |
 | `cardnews/run-render-reels.cmd` | 위를 묶어 도는 래퍼 (Windows) |
 
+## 모션 릴스 렌더러 — `cardnews/motion/motion-reels/` (2026-10-07 추가)
+
+훅과 끝 화면(CTA)은 원본 릴스의 프레임을 그대로 쓰고, 그 사이를 **대본에 맞춘 모션 장면**으로 채웁니다. 장면을 JSON 한 벌에 적으면 한 편이 나옵니다.
+명세 전체는 그 폴더의 `README.md`, 화면 규칙(글꼴·색·움직임)은 `STANDARD.md` 에 있습니다.
+
+```bash
+cp cardnews/reels-recipes.sample.json cardnews/reels-recipes.json
+cd cardnews/motion/motion-reels
+node render-full.mjs --scenes reels-rule-silent.fullmotion.json --stills --no-drive   # 장면별 스틸만 (빠름)
+node render-full.mjs --scenes reels-rule-silent.fullmotion.json --no-drive            # 전체 렌더
+```
+
+- ⚠️ **첫 줄(레시피 복사)을 빼면 바로 멈춥니다.**
+- 조립기처럼 **드라이브 업로드가 기본으로 켜져 있습니다.** 처음엔 `--no-drive` 를 붙이세요(아래 「쓰기 전에 바꿔야 할 것」).
+- **렌더 전에 막는 것 여섯**: 대본·레시피에 없는 글자 · 장면 JSON 에 안 적힌 글자 · 출처 없는 개수·분포 그림 · 인스타 앱 화면이 덮는 자리의 글자 · 바탕 대비 4.5:1 미만 · 0.6초가 안 되게 보이는 글자. **대본에 없는 숫자·글자가 화면에 들어가는 걸 코드가 막습니다.**
+- 렌더가 끝나면 「모션 기준 측정」(장면별 최소 글자 크기 · 동시에 움직이는 글자 수)을 찍습니다. 경고만 하고 막지는 않습니다.
+- 이 형식이 반응을 더 받는지는 **아직 판정하지 않았습니다.**
+
 ## 실제로 걸렸던 것들
 
 **같은 걸 재는 자를 클립마다 새로 맞춰야 했습니다.** 워터마크 픽셀을 세는 임계값을 전 클립에서 쓰던 값으로 두었더니, 어두운 클립에서 **생성 구간마저 0개**로 나왔습니다. 워터마크 밝기가 임계보다 낮았던 겁니다. 그대로 썼으면 「워터마크가 없다」는 거짓 결론이 나왔습니다.
@@ -77,6 +95,11 @@ npm 의존 **두 개**입니다.
 npm install
 npx playwright install chromium
 ```
+
+모션 릴스 렌더러를 쓰려면 둘이 더 있습니다.
+
+- **Noto Sans KR** 글꼴 — 렌더러가 글꼴이 실제로 그려지는지 검사합니다. 없으면 경고만 하고 진행합니다(글자 모양이 달라질 수 있습니다).
+- 말이 들어간 판(`tts-words.py`)은 **Python 과 `edge-tts`** 가 따로 필요합니다. 말 없는 판에는 필요 없습니다.
 
 ## 견본 레시피
 
