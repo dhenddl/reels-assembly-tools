@@ -118,7 +118,8 @@ export function speechFromAudio(ffmpegPath, mp3, offset = 0, thrDb = -40) {
 }
 
 // 오디오: 효과음 트랙(덕킹 포함) + 본 말 + CTA 말 → loudnorm 2패스 → 48k wav
-export function buildAudio({ ffmpegPath, V, spec, FPS, totalS, cutFrames, ctaStartS, hookEndS, outWav, sfxWav }) {
+// clipAudio(2026-10-13 · 10/23 발음 회차): 영상 칸 원본 소리 [{ wav, atS, gain }] — 장면 시작 시각에 깔고 말처럼 효과음 덕킹에도 센다.
+export function buildAudio({ ffmpegPath, V, spec, FPS, totalS, cutFrames, ctaStartS, hookEndS, outWav, sfxWav, clipAudio = [] }) {
   const sx = spec.sfx || {}, gains = { hook: 0.5, tick: 0.45, impact: 0.6, glitch: 0.4, ...(sx.gains || {}) };
   const events = [];
   if (sx.hook !== false) events.push({ t: 0, kind: 'hook', ms: Math.round((hookEndS + 0.15) * 1000), gain: gains.hook, why: '훅 typing — 이음새 임팩트가 훅→장면01 컷에 떨어진다' });
@@ -128,15 +129,16 @@ export function buildAudio({ ffmpegPath, V, spec, FPS, totalS, cutFrames, ctaSta
     events.push({ t: c._f0 / FPS + local, kind: e.kind, gain: gains[e.kind], why: `장면${i + 1} ${e.why || ''}`.trim() });
   }));
   const ctaOff = ctaStartS + (spec.voice.cta?.offset || 0);
-  const speech = [...speechFromAudio(ffmpegPath, V.main.mp3, 0), ...(V.cta ? speechFromAudio(ffmpegPath, V.cta.mp3, ctaOff) : [])];
+  const speech = [...speechFromAudio(ffmpegPath, V.main.mp3, 0), ...(V.cta ? speechFromAudio(ffmpegPath, V.cta.mp3, ctaOff) : []), ...clipAudio.flatMap((a) => speechFromAudio(ffmpegPath, a.wav, a.atS))];
   const duckDb = sx.duckDb ?? -14;
   const { wav, placed, peak, maxGainInSpeechDb } = buildSfxTrack({ totalS, events, speech, duckDb });
   writeFileSync(sfxWav, wav);
   const T = totalS.toFixed(6), ctaMs = Math.round((ctaStartS + (spec.voice.cta?.offset || 0)) * 1000);
   const st = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo';
-  const ins = ['-i', sfxWav, '-i', V.main.mp3, ...(V.cta ? ['-i', V.cta.mp3] : [])];
-  const pre = [`[0:a]${st}[s]`, `[1:a]${st}[v1]`, ...(V.cta ? [`[2:a]${st},adelay=${ctaMs}|${ctaMs}[v2]`] : []),
-    `[s][v1]${V.cta ? '[v2]' : ''}amix=inputs=${V.cta ? 3 : 2}:normalize=0:duration=longest,apad=whole_dur=${T},atrim=0:${T}[m]`];
+  const ins = ['-i', sfxWav, '-i', V.main.mp3, ...(V.cta ? ['-i', V.cta.mp3] : []), ...clipAudio.flatMap((a) => ['-i', a.wav])];
+  const c0 = V.cta ? 3 : 2, clipPre = clipAudio.map((a, k) => { const ms = Math.round(a.atS * 1000); return `[${c0 + k}:a]${st},volume=${a.gain ?? 1},adelay=${ms}|${ms}[c${k}]`; });
+  const pre = [`[0:a]${st}[s]`, `[1:a]${st}[v1]`, ...(V.cta ? [`[2:a]${st},adelay=${ctaMs}|${ctaMs}[v2]`] : []), ...clipPre,
+    `[s][v1]${V.cta ? '[v2]' : ''}${clipAudio.map((_, k) => `[c${k}]`).join('')}amix=inputs=${c0 + clipAudio.length}:normalize=0:duration=longest,apad=whole_dur=${T},atrim=0:${T}[m]`];
   const L = { I: -14, TP: -1.5, LRA: 11, ...(spec.loudness || {}) };
   const p1 = spawnSync(ffmpegPath, ['-hide_banner', ...ins, '-filter_complex', [...pre, `[m]loudnorm=I=${L.I}:TP=${L.TP}:LRA=${L.LRA}:print_format=json[o]`].join(';'), '-map', '[o]', '-f', 'null', '-'], { encoding: 'utf8' });
   const j1 = JSON.parse((p1.stderr.match(/\{[\s\S]*?\}/g) || []).pop());

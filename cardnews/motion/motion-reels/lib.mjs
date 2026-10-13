@@ -38,6 +38,10 @@ export const FIELDS = {
   beforeAfter: (c) => [c.before.label, String(c.before.value), c.after.label, String(c.after.value)],
   progressBar: (c) => [...c.chapters],
   faqFlip: (c) => c.cards.flatMap((x) => [x.q, x.a]),
+  // 영상 칸 (2026-10-13) — 라벨만 화면 글자다. 칸 안 영상은 c.src 가 출처(render-full 이 ffmpeg 로 얹는다)
+  clipFrame: (c) => [...(c.labels || [])],
+  // 막대 N개 (2026-10-13) — 막대 높이는 valuesFrom 데이터(render-full 이 채우고 표시 값과 대조한다) · 글자는 제목·표시·축
+  bars: (c) => [...(c.title ? [c.title] : []), ...(c.marks || []).flatMap((m) => [m.label, ...(m.value != null ? [String(m.value)] : [])]), ...(c.axis || [])],
 };
 
 // ── 글자 출처: 선호 줄 → 대본 전체 → 레시피. 낱말 단위 일치를 먼저, 없을 때만 부분 문자열 ──

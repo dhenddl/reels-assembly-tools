@@ -7,12 +7,15 @@
 // 검사는 render-cuts.mjs 와 같은 lib.mjs 한 벌 (글자 출처 · safe-zone 구역 · WCAG 대비 · 선언 안 된 글자) 에
 // **읽을 시간** 을 더한다 — 선언된 글자마다 「불투명도 ≥0.9 · 마스크에 ≥90% 드러남」 프레임이 minRead 초 이상이어야 한다.
 // ⛔ 기반 영상은 읽기만 한다. 훅·CTA 는 원본 프레임을 trim 으로 잘라 붙인다(다시 그리지 않는다).
+//   ✏️ 예외 하나(2026-10-13): 장면 JSON `hook.motion: true` 면 훅 구간만 hook-motion.mjs 가 다시 그린다 —
+//      같은 카드(문구·바탕·배치 그대로)에 0초부터 등장 움직임만 더한 판. 길이는 hook.from/to 그대로. 근거·대조는 그 파일 머리말.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { loadTheme } from '../../palette.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { loadVoice, ensureVoice, applyTiming, mapping, buildAudio, measureLoudness, cueSec } from './voice.mjs';
 import { HERE, ffmpegPath, norm, loadSources, provenanceOf, checkShapes, makeZone, makeChecker, openPage, renderClip, renderStill, finalChecks, printTypo } from './lib.mjs';
+import { renderHookMotion, loadRecipe, firstFrameInkPct, SETTLE as HOOK_SETTLE } from './hook-motion.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : d; };
@@ -42,6 +45,7 @@ if (!STILLS && !existsSync(BASE)) {
   if (r.status !== 0 || !existsSync(BASE)) { console.error(`⛔ 기반 영상을 못 만들었다(exit ${r.status}): ${BASE}`); process.exit(1); }
 }
 if (spec.voice) ensureVoice(spec, JD, HERE);
+if (!spec.voice && spec.scenes.some((c) => c.keepAudio)) { console.error('⛔ keepAudio 는 voice 블록이 있는 판(V-F)에서만 쓴다 — 소리 믹스가 거기 있다'); process.exit(1); }
 
 // ── 1-2) 말 (있으면) — 절에 맞춰 장면 길이 · 장면 안 큐를 정한다 ───────────────
 const V = spec.voice ? loadVoice(spec, JD) : null;
@@ -49,6 +53,26 @@ if (V) {
   applyTiming(spec, V, FPS);
   console.log(`말: ${V.main.voice} ${V.main.rate} · ${V.main.dur.toFixed(3)}s · 절 ${V.main.clauses.length}개${V.cta ? ` · CTA 말 ${V.cta.dur.toFixed(3)}s` : ''} · aiVoice=${spec.voice.aiVoice === true}`);
   if (spec.voice.aiVoice !== true) { console.error('⛔ 합성 음성 판은 voice.aiVoice: true 를 적는다 (AI 라벨 대상)'); process.exit(1); }
+}
+
+// ── 1-3) 막대 데이터 (bars · 2026-10-13) ────────────────────────────────────────
+//   막대는 개수·분포를 그림으로 보여 준다 → 높이를 장면 JSON 에 손으로 적지 않는다. valuesFrom 파일에서 채우고,
+//   표시(marks)의 값 글자가 그 날짜 막대의 데이터와 글자까지 같은지 본다 — 다르면 멈춘다.
+for (const [i, c] of spec.scenes.entries()) {
+  if (c.type !== 'bars') continue;
+  const tag = `장면${String(i + 1).padStart(2, '0')} bars`;
+  if (!c.valuesFrom) { console.error(`⛔ ${tag}: valuesFrom(데이터 파일)이 없다`); process.exit(1); }
+  if (c.values) { console.error(`⛔ ${tag}: values 를 장면 JSON 에 직접 적지 않는다 — valuesFrom 에서 채운다`); process.exit(1); }
+  const D = JSON.parse(readFileSync(resolve(JD, c.valuesFrom), 'utf8')), rows = D.bars || [], key = c.valueKey || 'views';
+  c.values = rows.map((r) => r[key]);
+  if (!rows.length || c.values.some((x) => typeof x !== 'number')) { console.error(`⛔ ${tag}: ${c.valuesFrom} 의 bars[].${key} 가 숫자가 아니다`); process.exit(1); }
+  for (const m of c.marks || []) {
+    const k = rows.findIndex((r) => String(r.publishedKst).startsWith(m.at));
+    if (!m.at || k < 0) { console.error(`⛔ ${tag}: 표시 「${m.label}」 의 at(${m.at}) 에 맞는 막대가 없다`); process.exit(1); }
+    m.i = k;
+    if (m.value != null && String(m.value) !== String(c.values[k])) { console.error(`⛔ ${tag}: 표시 값 「${m.value}」 ≠ 데이터 ${m.at} ${c.values[k]}`); process.exit(1); }
+  }
+  console.log(`막대: ${c.valuesFrom} · ${rows.length}개 · ${key} 최소 ${Math.min(...c.values)} · 최대 ${Math.max(...c.values)} · 표시 ${(c.marks || []).map((m) => `${m.at}(${m.label}${m.value != null ? ' ' + m.value : ''})`).join(' · ')}`);
 }
 
 // ── 2) 글자 출처 ─────────────────────────────────────────────────────────────
@@ -60,6 +84,23 @@ for (const p of provenance) console.log(`  ${p.label} ${p.type.padEnd(16)} 「${
 checkShapes(items, srcs);
 
 // ── 3) 장면 렌더 ─────────────────────────────────────────────────────────────
+// 영상 칸(clipFrame · 2026-10-13): src 의 from–to 초를 FPS 로 맞춰 box 크기로 늘리고, 짧으면 마지막 프레임을 장면 끝까지 붙잡는다.
+//   ⛔ 영상 안 그림은 글자 게이트 밖이다 — 그 파일이 곧 실측 원본이다(출처 = src · 장면표에 찍는다). 라벨만 게이트를 지난다.
+//   ⛔ 원본 영상은 읽기만 한다. 소리는 쓰지 않는다(이 판의 소리는 말·효과음 믹스가 정한다).
+function overlayVideo(c, sceneMp4, n) {
+  const src = resolve(JD, c.src);
+  if (!existsSync(src)) { console.error(`⛔ 영상 칸 원본이 없다: ${src}`); process.exit(1); }
+  const b = c.box; if (!b || [b.x, b.y, b.w, b.h].some((v) => !Number.isInteger(v) || v % 2)) { console.error('⛔ clipFrame.box 는 짝수 정수 x·y·w·h (yuv420p 색차 정렬)'); process.exit(1); }
+  const from = c.from ?? 0, to = c.to ?? null, cr = c.crop;   // crop = 원본 px {x,y,w,h} — 원본의 빈 바탕을 잘라 낸다(실측 근거는 장면 JSON _crop)
+  const vf = `[1:v]trim=start=${from}${to != null ? `:end=${to}` : ''},setpts=PTS-STARTPTS,fps=${FPS},${cr ? `crop=${cr.w}:${cr.h}:${cr.x}:${cr.y},` : ''}scale=${b.w}:${b.h}:flags=lanczos,format=yuv420p,setsar=1,tpad=stop_mode=clone:stop=${n}[v];`
+    + `[0:v]format=yuv420p,setsar=1[bg];[bg][v]overlay=${b.x}:${b.y}:eof_action=repeat,trim=end_frame=${n},setpts=PTS-STARTPTS[o]`;
+  const outp = sceneMp4.replace(/\.mp4$/, '-video.mp4');
+  const r = spawnSync(ffmpegPath, ['-y', '-hide_banner', '-loglevel', 'error', '-i', sceneMp4, '-i', src, '-filter_complex', vf, '-map', '[o]', '-an',
+    '-c:v', 'libx264', '-preset', 'slow', '-crf', '14', '-pix_fmt', 'yuv420p', '-r', String(FPS), outp], { stdio: 'pipe' });
+  if (r.status !== 0) { console.error('⛔ 영상 칸 합성 실패:', r.stderr?.toString().slice(-1200)); process.exit(1); }
+  console.log(`  영상 칸: ${c.src} ${from}–${to ?? '끝'}s → box ${b.x},${b.y} ${b.w}×${b.h} · ${n}프레임(짧으면 끝 프레임 정지)`);
+  return outp;
+}
 const zone = makeZone(W, H);
 console.log(`\n${W}×${H} · ${FPS}fps · 글자 구역 x ${zone.x0}–${zone.x1} · y ${zone.y0}–${zone.y1} (${zone.근거}) · 바탕 ${gr.rule}(${gr.first} 먼저)`);
 const t0 = Date.now();
@@ -94,12 +135,14 @@ for (const it of items) {
   }
   const out = join(CLIP_DIR, `${spec.slug}-${tag}.mp4`);
   const zi = await renderClip(page, c, { FPS, n, out, stillPath: join(STILL_DIR, `${tag}-mid.png`), onFrame }); zoneDecisions.push({ scene: it.label, type: c.type, ...zi });
-  clips.push({ path: out, n, key: it.key, type: c.type, ground: c.ground, lines: c.lines });
+  let path = out;
+  if (c.type === 'clipFrame') path = overlayVideo(c, out, n);   // 영상 칸: 렌더한 바탕·라벨 위 box 자리에 원본 영상을 얹는다
+  clips.push({ path, n, key: it.key, type: c.type, ground: c.ground, lines: c.lines, src: c.src });
 }
 await browser.close();
 if (LAYOUT === 'center') {
   console.log('\n장면 구역 (center · 세로반영)');
-  for (const z of zoneDecisions) console.log(`  ${z.scene} ${z.type.padEnd(16)} ${z.mode === 'fill' ? `채움 · 배율 ${z.scale} · 블록 높이 ${z.blockH} · 블록 중심 y ${z.target}${z.altFull ? ` · [비교] 예전 구역·배율1 중심 (${z.altFull.cx}, ${z.altFull.cyRule})` : ''}` : z.mode === 'upper' ? `위쪽 구역 x ${z.zone.x0}–${z.zone.x1} · y ${z.zone.y0}–${z.zone.y1} · 글자 배율 ${z.scale} · 블록 높이 ${z.blockH} → 목표 중심 y ${z.target}${z.shifted ? '' : ' (못 옮김)'}${z.altFull ? ` · [비교] 예전 구역·배율1 이면 높이 ${z.altFull.h} · 중심 (${z.altFull.cx}, ${z.altFull.cyRule})` : ''}` : `⚠️ 예전 구역으로 되돌림 x ${z.zone.x0}–${z.zone.x1} (시도: ${(z.tried || []).map((t) => `배율 ${t.fs} 바닥 ${t.bottom}`).join(' · ')})`}`);
+  for (const z of zoneDecisions) console.log(`  ${z.scene} ${z.type.padEnd(16)} ${z.mode === 'fixed' ? `고정(영상 칸 · box) · 줄마다 규칙 x ${z.zone.x0}–${z.zone.x1}` : z.mode === 'fill' ? `채움 · 배율 ${z.scale} · 블록 높이 ${z.blockH} · 블록 중심 y ${z.target}${z.altFull ? ` · [비교] 예전 구역·배율1 중심 (${z.altFull.cx}, ${z.altFull.cyRule})` : ''}` : z.mode === 'upper' ? `위쪽 구역 x ${z.zone.x0}–${z.zone.x1} · y ${z.zone.y0}–${z.zone.y1} · 글자 배율 ${z.scale} · 블록 높이 ${z.blockH} → 목표 중심 y ${z.target}${z.shifted ? '' : ' (못 옮김)'}${z.altFull ? ` · [비교] 예전 구역·배율1 이면 높이 ${z.altFull.h} · 중심 (${z.altFull.cx}, ${z.altFull.cyRule})` : ''}` : `⚠️ 예전 구역으로 되돌림 x ${z.zone.x0}–${z.zone.x1} (시도: ${(z.tried || []).map((t) => `배율 ${t.fs} 바닥 ${t.bottom}`).join(' · ')})`}`);
 }
 finalChecks({ provenance, items, chk, errs });
 console.log(`\n글자 구역 검사: 통과 (${STILLS ? '중간 프레임' : '전 프레임'} · 그려진 글자 ${chk.drawn.size}종)`);
@@ -145,6 +188,16 @@ const vd = spawnSync(ffmpegPath, ['-hide_banner', '-i', BASE, '-vn', '-af', 'vol
 const maxVol = parseFloat((vd.match(/max_volume:\s*(-?[0-9.]+)/) || [])[1]);
 if (maxVol > -90) console.warn(`⚠️ 원본 오디오가 무음이 아니다(max ${maxVol} dB) — 이 판은 무음 트랙으로 채운다`);
 const hookN = spec.hook.to - spec.hook.from + 1;
+// 훅 모션(2026-10-13): 기반 영상 trim 대신 같은 카드를 움직임과 함께 다시 그린 클립을 쓴다
+let HOOKCLIP = null;
+if (spec.hook.motion) {
+  const recipe = loadRecipe(resolve(JD, spec.recipes), spec.slug);
+  HOOKCLIP = join(HERE, 'clips', `${spec.clipTag || spec.slug}-hook-motion.mp4`);
+  const hm = await renderHookMotion({ recipe, fps: FPS, n: hookN, out: HOOKCLIP });
+  const ink = firstFrameInkPct(HOOKCLIP);
+  console.log(`훅 모션: ${hookN}프레임 · 움직임 f0–f${hm.movingFrames - 1}(${HOOK_SETTLE}s) · 첫 프레임 잉크 ${ink.toFixed(2)}%`);
+  if (!(ink >= 1.0)) { console.error('⛔ 훅 모션 첫 프레임 잉크가 1.0% 미만 — hook-check 기준으로 「훅 없음」과 구분이 안 된다'); process.exit(1); }
+}
 const ctaMode = spec.cta.mode || 'band';
 // CTA 화면: sting = 브랜드 스팅 파일(읽기만) · band = 원본 알약 띠만 bg 위 · frames = 원본 통째
 const STING = ctaMode === 'sting' ? resolve(JD, spec.cta.sting) : null;
@@ -165,12 +218,24 @@ if (V) {
   const cutFrames = []; { let f = hookN; clips.forEach((c, k) => { if (k > 0) cutFrames.push(f); f += c.n; }); cutFrames.push(f); }
   mkdirSync(join(HERE, 'voice'), { recursive: true });
   const outWav = join(HERE, 'voice', `${spec.slug}-mix.wav`), sfxWav = join(HERE, 'voice', `${spec.slug}-sfx.wav`);
-  audio = buildAudio({ ffmpegPath, V, spec, FPS, totalS, cutFrames, ctaStartS: ctaVoiceS, hookEndS: hookEndF / FPS, outWav, sfxWav });
+  // 영상 칸 원본 소리(keepAudio · 2026-10-13 · 10/23 발음 회차 — 답이 소리라 소리를 살린다). 장면 시작 시각에 깐다 · 원본은 읽기만.
+  const clipAudio = [];
+  for (const c of spec.scenes) {
+    if (c.type !== 'clipFrame' || !c.keepAudio) continue;
+    const wav = join(HERE, 'clips', `${spec.clipTag || spec.slug}-${String(c._f0).padStart(4, '0')}-clipaudio.wav`);
+    const ex = spawnSync(ffmpegPath, ['-y', '-hide_banner', '-loglevel', 'error', '-i', resolve(JD, c.src), '-vn', '-af', `atrim=start=${c.from ?? 0}${c.to != null ? `:end=${c.to}` : ''},asetpts=PTS-STARTPTS`, '-ac', '2', '-ar', '48000', wav], { stdio: 'pipe' });
+    if (ex.status !== 0) { console.error('⛔ 영상 칸 소리 추출 실패:', ex.stderr?.toString().slice(-600)); process.exit(1); }
+    clipAudio.push({ wav, atS: c._f0 / FPS, gain: c.audioGain ?? 1, src: c.src });
+    console.log(`  영상 칸 소리: ${c.src} ${c.from ?? 0}–${c.to ?? '끝'}s → ${(c._f0 / FPS).toFixed(3)}s 에 깐다 · gain ${c.audioGain ?? 1}`);
+  }
+  audio = buildAudio({ ffmpegPath, V, spec, FPS, totalS, cutFrames, ctaStartS: ctaVoiceS, hookEndS: hookEndF / FPS, outWav, sfxWav, clipAudio });
   audio.wav = outWav;
 }
-const inputs = ['-i', BASE, ...clips.flatMap((c) => ['-i', c.path]), ...(STING ? ['-i', STING] : []), ...(audio ? ['-i', audio.wav] : ['-f', 'lavfi', '-t', (totalS + tail).toFixed(6), '-i', 'anullsrc=r=44100:cl=stereo'])];
+const inputs = ['-i', BASE, ...clips.flatMap((c) => ['-i', c.path]), ...(STING ? ['-i', STING] : []), ...(audio ? ['-i', audio.wav] : ['-f', 'lavfi', '-t', (totalS + tail).toFixed(6), '-i', 'anullsrc=r=44100:cl=stereo']),
+  ...(HOOKCLIP ? ['-i', HOOKCLIP] : [])];
+const hookIdx = 1 + clips.length + (STING ? 1 : 0) + 1;   // 훅 모션 클립은 맨 뒤 입력(오디오 입력 번호를 안 바꾼다)
 const norm4 = 'setpts=PTS-STARTPTS,format=yuv420p,setsar=1';
-const fc = [`[0:v]trim=start_frame=${spec.hook.from}:end_frame=${spec.hook.to + 1},${norm4}[hk]`];
+const fc = [HOOKCLIP ? `[${hookIdx}:v]${norm4}[hk]` : `[0:v]trim=start_frame=${spec.hook.from}:end_frame=${spec.hook.to + 1},${norm4}[hk]`];
 clips.forEach((c, k) => fc.push(`[${k + 1}:v]${norm4}[s${k}]`));
 // CTA: band(기본) = 원본의 알약 띠만 잘라 palette bg 단색 위 같은 자리에 얹는다 — 터미널 글자가 안 새게.
 //      frames      = 원본 프레임 통째로 (알약 위 터미널 화면까지 같이 나온다)
@@ -194,7 +259,7 @@ if (r.status !== 0) { console.error('⛔ 합성 실패:', r.stderr?.toString().s
 
 // 장면표 + 경계 파일 (review.mjs 가 읽는다)
 let f = hookN; const bounds = [], table = [];
-table.push({ seg: '훅(원본)', from: 0, to: hookN, lines: 'hookBadge·hookText·hookSub', ground: spec.hook.ground });
+table.push({ seg: HOOKCLIP ? '훅(모션 · hook-motion.mjs)' : '훅(원본)', from: 0, to: hookN, lines: 'hookBadge·hookText·hookSub', ground: spec.hook.ground });
 for (const c of clips) { bounds.push({ cut: c.key, type: c.type, in: f, out: f + c.n }); table.push({ seg: `장면${String(c.key).padStart(2, '0')} ${c.type}`, from: f, to: f + c.n, lines: c.lines.join('·'), ground: c.ground }); f += c.n; }
 table.push({ seg: (ctaMode === 'sting' ? 'CTA(브랜드 스팅)' : ctaMode === 'band' ? 'CTA(원본 알약 띠)' : 'CTA(원본)') + (hold ? ` +정지 ${hold}f` : ''), from: f, to: f + ctaN, lines: V && V.cta ? 'CTA 말' : '—', ground: spec.cta.ground });
 const loud = audio ? measureLoudness(ffmpegPath, OUT) : null;

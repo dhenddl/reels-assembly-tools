@@ -754,6 +754,80 @@ TYPES.termCard = (g, t, d, c) => {
   g.restore();
 };
 
+// 영상 칸 (2026-10-13 · 릴스 세션) — 바탕 · 칸 테두리 · 라벨만 그린다. **영상은 render-full 이 ffmpeg 로 c.box 자리에 얹는다.**
+//   c.box = {x, y, w, h}(프레임 px · 1080×1920 기준) · c.labels = [글자…](2개면 칸 왼쪽·오른쪽 절반 가운데 · 1개면 가운데)
+//   c.labelsAt = 'above'(기본) | 'below' · c.labelPx = 라벨 크기(기본 56)
+//   ⛔ 칸 안(영상)은 글자 게이트를 안 지난다 — 그 영상 파일이 실측 원본이고 출처는 c.src 다. 라벨은 게이트를 지난다(FIELDS.clipFrame).
+//   ⛔ 위치는 고정이다(setCut 이 구역 고르기를 건너뛴다) — 라벨이 옮겨지면 영상 칸과 어긋난다. 그래서 box 를 글자 구역 규칙에 맞게 JSON 에서 고른다.
+TYPES.clipFrame = (g, t, d, c) => {
+  base(g, t);
+  const b = c.box, px = (c.labelPx || 56) * S0, gap = 34 * S0, e = 8 * S0;
+  roundBox(g, b.x - e, b.y - e, b.w + 2 * e, b.h + 2 * e, 18 * S0, null, R.mark, 3 * S0);
+  const ls = c.labels || [], a = E.outExpo(seg(t, 0, 0.35));
+  const ly = c.labelsAt === 'below' ? b.y + b.h + e + gap + px / 2 : b.y - e - gap - px / 2;
+  g.save(); g.globalAlpha = clamp(a * 1.2); g.translate(0, lerp(18 * S0, 0, a));
+  ls.forEach((s, i) => {
+    const cx = ls.length === 1 ? b.x + b.w / 2 : b.x + (b.w / ls.length) * (i + 0.5);
+    text(g, s, cx, ly, px, { align: 'c', w: 800, color: i === ls.length - 1 && ls.length > 1 ? R.hi : R.ink });
+  });
+  g.restore();
+};
+
+// 막대 N개 (2026-10-13 · 릴스 세션 · 10/21 「예약 소문」) — 막대를 한 번에 세우고, 짚을 막대에만 표시가 켜진다.
+//   c.values = 숫자 배열(⛔ JSON 에 직접 안 적는다 — render-full 이 c.valuesFrom 파일에서 채운다 · 개수·분포를 그림으로 보여 주는 장면이라 출처 필수)
+//   c.marks = [{ i, label, value? }] — i 번째 막대 위에 value(그 막대의 값 글자 · render-full 이 데이터와 같은지 본다)와 label 을 단다
+//   c.title? · c.axis? = [왼쪽 끝 글자, 오른쪽 끝 글자]
+//   박자: 막대 0.05–0.7s(왼쪽부터 조금씩 늦게) · 표시 0.85–1.15s · 그 뒤 머문다
+TYPES.bars = (g, t, d, c) => {
+  base(g, t);
+  const v = c.values || [], n = v.length; if (!n) return;
+  const max = Math.max(...v, 1), marks = c.marks || [];
+  // 크기(1080 기준 · STANDARD 5 본문 46px 이상에 맞춘다): 표시 50 · 값 48 · 축 46 · 제목 56
+  //   ✏️ 표시는 막대 위가 아니라 **막대 영역 위 한 줄**에 둔다 — 막대 위에 얹으면 이웃 막대를 덮었다(10-13 시험).
+  //      표시끼리 안 겹치게 옆으로 밀고(왼쪽부터 · 넘치면 오른쪽에서 되민다) 각 막대 꼭대기까지 가는 선을 긋는다.
+  const tpx = 56 * S, lpx = 50 * S, vpx = 48 * S, apx = 46 * S, stack = lpx + 18 * S + vpx;
+  const W0 = Math.min(Z.w * 0.98, 900 * S), x0 = Z.cx - W0 / 2, gap = W0 / n, bw = gap * 0.66;
+  const bh = 340 * S, head = (c.title ? tpx + 36 * S : 0) + stack + 40 * S;
+  const total = head + bh + (c.axis ? 26 * S + apx : 0);
+  const yT = topFor(total), base0 = yT + head + bh;
+  if (c.title) text(g, c.title, Z.cx, yT + tpx / 2, tpx, { align: 'c', w: 800, color: R.ink });
+  const marked = new Set(marks.map((m) => m.i));
+  // 바닥선
+  g.fillStyle = R.trackLine; g.fillRect(x0 - 6 * S, base0, W0 + 12 * S, 3 * S);
+  for (let i = 0; i < n; i++) {
+    const p = E.outExpo(seg(t, 0.05 + i * 0.015, 0.45 + i * 0.015)), h = Math.max(0, bh * (v[i] / max) * p);
+    const x = x0 + gap * i + (gap - bw) / 2;
+    g.fillStyle = marked.has(i) ? R.hi : R.tick;
+    if (h > 0.5) { g.beginPath(); g.roundRect(x, base0 - h, bw, h, [Math.min(6 * S, bw / 3), Math.min(6 * S, bw / 3), 0, 0]); g.fill(); }
+    else { g.fillRect(x, base0 - 3 * S, bw, 3 * S); }   // 0 은 바닥선 위 얇은 칸 — 막대 자리는 비우지 않는다
+  }
+  // 표시가 켜지는 때: c.popSec 배열(말 큐 · 표시의 group 번째 값) → 없으면 0.85s
+  const popAt = (m) => (Array.isArray(c.popSec) ? c.popSec[m.group || 0] : c.popSec) ?? 0.85;
+  // 자리 — 켜지는 때와 무관하게 전부 먼저 잡는다(늦게 켜지는 표시 때문에 먼저 켜진 표시가 옮겨 가지 않게)
+  const sorted = [...marks].sort((p, q) => p.i - q.i).map((m) => {
+    const wv = m.value != null ? ink(g, String(m.value), vpx, 'sans', 900).w : 0, wl = ink(g, m.label, lpx, 'sans', 800).w;
+    return { m, cx: x0 + gap * m.i + gap / 2, top: base0 - Math.max(3 * S, bh * (v[m.i] / max)), half: Math.max(wv, wl) / 2 + 16 * S };
+  });
+  const lo = Z.x0, hi = Z.x1;
+  sorted.forEach((s, k) => { s.tx = Math.max(s.cx, lo + s.half); if (k) s.tx = Math.max(s.tx, sorted[k - 1].tx + sorted[k - 1].half + s.half); });
+  for (let k = sorted.length - 1; k >= 0; k--) { const lim = k === sorted.length - 1 ? hi - sorted[k].half : sorted[k + 1].tx - sorted[k + 1].half - sorted[k].half; sorted[k].tx = Math.min(sorted[k].tx, lim); }
+  const yl = yT + (c.title ? tpx + 36 * S : 0) + lpx / 2, yv = yl + lpx / 2 + 18 * S + vpx / 2;
+  g.save();
+  for (const s of sorted) {
+    const a = E.outExpo(seg(t, popAt(s.m), popAt(s.m) + 0.3)); if (a <= 0) continue;
+    g.globalAlpha = clamp(a * 1.2);
+    g.strokeStyle = R.hi; g.lineWidth = 2 * S; g.beginPath(); g.moveTo(s.tx, yv + vpx / 2 + 8 * S); g.lineTo(s.cx, s.top - 6 * S); g.stroke();
+    text(g, s.m.label, s.tx, yl, lpx, hiWord({ align: 'c', w: 800 }));
+    if (s.m.value != null) text(g, String(s.m.value), s.tx, yv, vpx, { align: 'c', w: 900, color: R.ink });
+  }
+  g.restore();
+  if (c.axis) {
+    const ya = base0 + 26 * S + apx / 2;
+    text(g, c.axis[0], x0, ya, apx, { align: 'l', w: 700, color: R.sub });
+    text(g, c.axis[1], x0 + W0, ya, apx, { align: 'r', w: 700, color: R.sub });
+  }
+};
+
 // T10 개념 도해 — 상자 톡 → 화살표가 선을 그림 → 다음 상자 (세로로 쌓음) · wow: 마지막 상자만 크게 튕기며 빛
 TYPES.flowDiagram = (g, t, d, c) => {
   base(g, t); const k = kb(d, BASE_DICT.flowDiagram), T = (x) => x * k, O = onSolid(), H2 = hiFill();
@@ -1069,6 +1143,12 @@ window.setCut = (c) => {
   CENTER = (c.layout || LAYOUT0) === 'center';
   Z = ZFULL; S = S0; FS = 1; FILL = null;
   let info = { center: CENTER, mode: 'full', scale: 1, zone: zInfo(ZFULL) };
+  // 영상 칸은 box(프레임 px)에 고정 — 구역 고르기가 라벨을 옮기면 영상과 어긋난다. 검사는 채움 구도와 같은 「줄마다」 규칙으로 받는다
+  if (c.type === 'clipFrame') {
+    if (!(CENTER && ZUP)) return { ...info, mode: 'fixed' };
+    const ZC = { x0: ZUP.x0, x1: ZUP.x1, y0: ZUP.y0, y1: ZFULL.y1, w: ZUP.w, h: ZUP.h, cx: ZUP.cx, cy: ZUP.cy };
+    return { center: true, mode: 'fixed', scale: 1, zone: zInfo(ZC), perLine: { yU: ZUP.y1, xR: ZFULL.x1 } };
+  }
   if (CENTER && ZUP && c.fill !== false) {
     // 2026-09-29 개정 — **줄마다** 규칙: 줄 바닥이 버튼 열 시작(ZUP.y1) 위면 오른쪽 끝 ≤ ZUP.x1(1004), 아래면 ≤ ZFULL.x1(760).
     //   글자 블록 전체는 ZUP.y0–ZFULL.y1(154–1270). 배율은 1.6 부터 내려가며 들어가는 가장 큰 값, 세로는 블록 중심을 H/2 에 가장 가깝게.

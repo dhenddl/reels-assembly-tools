@@ -40,6 +40,7 @@ node check-cta.mjs --check <결과.mp4>                                         
 |---|---|
 | `slug` · `base` · `script` · `recipes` · `fps` · `out` | 원본 릴스 · 대본 · 레시피 · 출력 이름 |
 | `hook.from/to` | 원본 훅 프레임 범위(실측 근거는 `_measured`) |
+| `hook.motion` | `true` 면 훅 구간을 원본 trim 대신 `hook-motion.mjs` 로 다시 그린다 — **같은 카드에 0초부터 등장 움직임만**(제목 0–0.6s · 배지 0.04–0.4s · 보조 0.3–0.75s · 글로 0–1s · 이후 정지 카드와 같은 화면). 길이는 `from/to` 그대로. 기본 끔. 첫 프레임 잉크 < 1.0% 면 멈춘다(hook-check 기준). 2026-10-13 신설 · 10/21 시험 회차 |
 | `cta.from/to` · `cta.mode` · `cta.band.y0/y1` | 기본 `band`: 알약 띠만 떼어 palette `bg` 단색 위에 얹는다(터미널 글자 안 샘). `frames` = 원본 통째 |
 | `groundRule` | 바탕 교대 규칙(아래) |
 | `minRead` | 글자마다 완전히 보여야 하는 최소 시간(초). 기본 0.6 |
@@ -228,6 +229,7 @@ node render-full.mjs --scenes <슬러그>.voice.json
 ## 파일
 
 - `render-full.mjs`: 전체 모션
+- `hook-motion.mjs`: 0초부터 움직이는 훅(`hook.motion`). 정지 카드 CSS 를 값 그대로 옮겨 왔다(make-termcast.mjs 는 1호·4호 공개 자료라 안 고쳤다) — 그쪽 훅 CSS 를 바꾸면 여기도 같이. `--parity <기반.mp4>` 로 다 멈춘 프레임을 정지 훅과 PSNR 대조(🔬 10-13 reels-one-command: 54.9 dB · 음성 대조 비훅 프레임 17.7 dB)
 - `render-cuts.mjs`: 원본 위에 컷을 덮거나(replace) 끼운다(insert)
 - `lib.mjs`: 게이트 한 벌(두 렌더러가 같이 쓴다)
 - `cuts.html`: 장면 라이브러리. 계약은 `window.frame(t)` 하나
